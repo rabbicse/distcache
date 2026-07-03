@@ -3,6 +3,8 @@ package server
 import (
 	"bufio"
 	"net"
+
+	"github.com/rabbicse/distcache/internal/protocol"
 )
 
 func (s *Server) handleConnection(conn net.Conn) {
