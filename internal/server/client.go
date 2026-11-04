@@ -28,7 +28,7 @@ type Client struct {
 	conn  net.Conn
 	r     *resp.Reader
 	w     *resp.Writer
-	wmu   sync.Mutex
+	wmu   sync.Mutex // serialises every write to conn: replies (via w.Mu), pushes, replication
 	db    int
 	proto int
 
@@ -84,6 +84,7 @@ func (s *Server) newClient(conn net.Conn) *Client {
 		laddr:     conn.LocalAddr().String(),
 	}
 	c.w = resp.NewWriter(&countingWriter{conn, &s.stats.netOutput}, 2)
+	c.w.Mu = &c.wmu
 	c.r.MaxBulkLen = s.cfg.ProtoMaxBulkLen.Load()
 	c.name.Store("")
 	c.libName.Store("")
@@ -121,12 +122,10 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// flush sends buffered replies.
+// flush sends buffered replies. The writer takes wmu itself (see newClient),
+// so callers must not hold wmu.
 func (c *Client) flush() error {
-	c.wmu.Lock()
-	err := c.w.Flush()
-	c.wmu.Unlock()
-	return err
+	return c.w.Flush()
 }
 
 func (c *Client) inPubSub() bool { return c.subCount.Load() > 0 }

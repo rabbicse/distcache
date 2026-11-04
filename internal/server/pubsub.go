@@ -196,8 +196,17 @@ func (c *Ctx) subscribe(kind subKind) {
 	cl.startPush()
 	direct := c.W == cl.w
 	if direct {
+		// Hold wmu across registration and the acks so no push can slip in
+		// before them. Flush (explicit or from a large reply) would take
+		// wmu through W.Mu and deadlock, so detach Mu while we hold it. Only
+		// this goroutine touches W.Mu; the push goroutine writes Out directly.
 		cl.wmu.Lock()
-		defer cl.wmu.Unlock()
+		mu := c.W.Mu
+		c.W.Mu = nil
+		defer func() {
+			c.W.Mu = mu
+			cl.wmu.Unlock()
+		}()
 	}
 	subName, _ := kind.names()
 	h := c.s.pubsub

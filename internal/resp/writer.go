@@ -5,6 +5,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -19,11 +21,23 @@ var (
 // Proto selects the protocol version (2 or 3). RESP3-only types are mapped to
 // their RESP2 equivalents exactly as Redis does.
 type Writer struct {
-	Out    io.Writer
-	Proto  int
-	buf    []byte
-	err    error
-	nflush uint64
+	Out   io.Writer
+	Proto int
+
+	// Mu, when non-nil, is the mutex that serialises every write to Out
+	// (the owning client's write mutex). Flush holds it around the Out.Write
+	// call so out-of-band writers that lock the same mutex cannot interleave
+	// bytes with a reply. It guards only the write to Out, not buf.
+	Mu *sync.Mutex
+
+	// buf, err and the Truncate/Len/append paths belong to the single
+	// goroutine that owns the Writer; they are not safe for concurrent use.
+	buf []byte
+	err error
+
+	// nflush counts writes to Out. It is atomic because Flush may run while
+	// another goroutine holds Mu and reads Flushes.
+	nflush atomic.Uint64
 }
 
 const flushThreshold = 64 * 1024
@@ -54,18 +68,23 @@ func (w *Writer) Truncate(n int) {
 // Flushes returns how many times buffered data was actually written to Out.
 // Callers compare it before and after an operation to learn whether bytes of
 // a partial reply have already left the buffer (and so cannot be Truncated).
-func (w *Writer) Flushes() uint64 { return w.nflush }
+func (w *Writer) Flushes() uint64 { return w.nflush.Load() }
 
 // Err returns the first write error.
 func (w *Writer) Err() error { return w.err }
 
-// Flush writes buffered bytes to Out.
+// Flush writes buffered bytes to Out, holding Mu (if set) for the write. The
+// caller must not already hold Mu.
 func (w *Writer) Flush() error {
+	if w.Mu != nil {
+		w.Mu.Lock()
+		defer w.Mu.Unlock()
+	}
 	if w.Out == nil || len(w.buf) == 0 {
 		return w.err
 	}
 	if w.err == nil {
-		w.nflush++
+		w.nflush.Add(1)
 		_, w.err = w.Out.Write(w.buf)
 	}
 	if cap(w.buf) > 1<<20 {
