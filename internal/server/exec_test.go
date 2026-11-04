@@ -73,6 +73,14 @@ func TestExec_BlockingTimeoutArgument(t *testing.T) {
 		{"XREADGROUP", []string{"XREADGROUP", "GROUP", "g", "c", "BLOCK", "0", "STREAMS", "q", ">"}},
 		{"lowercase", []string{"blpop", "q", "0"}},
 	}
+	for _, name := range []string{"BLMPOP", "BZMPOP", "BLPOP", "XREAD", "BLMOVE"} {
+		t.Run("bare/"+name, func(t *testing.T) {
+			v, err := s.Exec(name)
+			if err != nil || v.Type != '-' || !strings.Contains(string(v.Str), "wrong number of arguments") {
+				t.Fatalf("got %+v, %v, want wrong-arity error reply", v, err)
+			}
+		})
+	}
 	for _, tc := range zero {
 		t.Run("zero/"+tc.name, func(t *testing.T) {
 			if _, err := s.Exec(tc.args...); !errors.Is(err, ErrWouldBlock) {
@@ -164,8 +172,61 @@ func TestSession_CloseUnwatches(t *testing.T) {
 	s := newExecServer(t)
 	ss := s.NewSession()
 	mustExec(t, ss, "WATCH", "k")
+	if s.watches.count.Load() != 1 {
+		t.Fatalf("watch count before Close: got %d, want 1", s.watches.count.Load())
+	}
 	ss.Close()
-	if v, _ := s.Exec("CLIENT", "LIST"); strings.Contains(string(v.Str), "watch=1") {
-		t.Fatalf("watch still registered: %q", v.Str)
+	s.watches.mu.Lock()
+	defer s.watches.mu.Unlock()
+	for wk, set := range s.watches.m {
+		if _, ok := set[ss.c]; ok {
+			t.Fatalf("closed session still watches %v", wk)
+		}
+	}
+	if n := s.watches.count.Load(); n != 0 {
+		t.Fatalf("watch count after Close: got %d, want 0", n)
+	}
+}
+
+func TestSession_CloseReleasesBlockedExec(t *testing.T) {
+	s := newExecServer(t)
+	ss := s.NewSession()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = ss.Exec("BLPOP", "q", "30")
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for !ss.c.blockedNow.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("Exec never blocked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ss.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Exec still blocked 1s after Close")
+	}
+}
+
+func TestSession_ReadPush(t *testing.T) {
+	s := newExecServer(t)
+	ss := s.NewSession()
+	t.Cleanup(ss.Close)
+	mustExec(t, ss, "SUBSCRIBE", "ch")
+	if _, err := s.Exec("PUBLISH", "ch", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	v, err := ss.ReadPush(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Elems) != 3 || string(v.Elems[0].Str) != "message" || string(v.Elems[1].Str) != "ch" || string(v.Elems[2].Str) != "hello" {
+		t.Fatalf("got %+v, want [message ch hello]", v)
+	}
+	if _, err := ss.ReadPush(10 * time.Millisecond); err == nil {
+		t.Fatal("expected timeout error with no pending push")
 	}
 }

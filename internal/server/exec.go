@@ -48,8 +48,13 @@ func (s *syncBuf) len() int {
 	return s.b.Len()
 }
 
-// Session is an in-process client connection. It is not safe for concurrent
-// use by multiple goroutines; create one Session per goroutine.
+// Session is an in-process client connection. Apart from Close, which may be
+// called from another goroutine to release a blocked Exec, it is not safe
+// for concurrent use; create one Session per goroutine.
+//
+// Once a session has SUBSCRIBEd, push frames can arrive between calls, so an
+// Exec result on a subscribed session may be a push frame rather than the
+// command's reply. Use ReadPush to consume pushes deliberately.
 type Session struct {
 	s      *Server
 	c      *Client
@@ -99,7 +104,8 @@ func (s *Server) Exec(args ...string) (resp.Value, error) {
 // returned as a value of type '-' with a nil error. It returns ErrWouldBlock
 // for blocking commands with a zero timeout. Extra frames produced
 // synchronously by the same command (e.g. SUBSCRIBE with several channels)
-// are discarded after the first.
+// are discarded after the first. On a subscribed session the returned value
+// may be a push frame that arrived earlier; see Session.
 func (ss *Session) Exec(args ...string) (resp.Value, error) {
 	if len(args) == 0 {
 		return resp.Value{}, errors.New("exec: empty command")
@@ -127,8 +133,25 @@ func (ss *Session) Exec(args ...string) (resp.Value, error) {
 	return v, nil
 }
 
-// Close releases the session's watches, pub/sub subscriptions and pending
-// MULTI state. It is idempotent.
+// ReadPush returns the next frame the server sent to this session (typically
+// a pub/sub message), waiting up to timeout for one to arrive.
+func (ss *Session) ReadPush(timeout time.Duration) (resp.Value, error) {
+	deadline := time.Now().Add(timeout)
+	for ss.r.Buffered() == 0 && ss.buf.len() == 0 {
+		if time.Now().After(deadline) {
+			return resp.Value{}, errors.New("exec: no push before timeout")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	v, err := ss.r.ReadValue()
+	if err != nil {
+		return resp.Value{}, fmt.Errorf("exec: read push: %w", err)
+	}
+	return v, nil
+}
+
+// Close releases the session's watches and pub/sub subscriptions, and wakes
+// a blocked Exec. It is idempotent.
 func (ss *Session) Close() {
 	if !ss.closed.CompareAndSwap(false, true) {
 		return
@@ -137,7 +160,11 @@ func (ss *Session) Close() {
 	s.pubsub.unsubscribeAll(c)
 	s.watches.unwatchAll(c)
 	s.removeMonitor(c)
-	c.multi = nil
+	// Release an Exec blocked in waitBlocked (no socket, so no EOF signal).
+	select {
+	case c.unblockCh <- blockClosed:
+	default:
+	}
 	c.pushMu.Lock()
 	c.dead = true
 	if c.pushCh != nil {
@@ -152,12 +179,18 @@ type timeoutRule func(args [][]byte) (val []byte, ok bool)
 
 // lastArg: BLPOP, BRPOP, BZPOPMIN, BZPOPMAX, BLMOVE, BRPOPLPUSH end with the timeout.
 func lastArg(args [][]byte) ([]byte, bool) {
-	return args[len(args)-1], len(args) > 1
+	if len(args) < 2 {
+		return nil, false
+	}
+	return args[len(args)-1], true
 }
 
 // secondArg: BLMPOP and BZMPOP are "<cmd> timeout numkeys key... ".
 func secondArg(args [][]byte) ([]byte, bool) {
-	return args[1], len(args) > 1
+	if len(args) < 2 {
+		return nil, false
+	}
+	return args[1], true
 }
 
 // blockOption: XREAD and XREADGROUP take "BLOCK ms" before the STREAMS keyword.
