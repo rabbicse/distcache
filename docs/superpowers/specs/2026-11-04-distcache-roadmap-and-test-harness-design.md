@@ -235,3 +235,9 @@ Guides live in `docs/guides/NN-<topic>.md`, one per subsystem (RESP, dispatch an
 - Java client choice (Jedis vs Lettuce) — decide in sub-project 5.
 - Windows service: accept `golang.org/x/sys` as the server's single dependency (default), or stay zero-dep and document WinSW/NSSM.
 - Which Redis 8 bundled capabilities (vector sets, JSON, Query Engine, time series, probabilistic) are in scope, and in which sub-project.
+
+## 10. Decisions (2026-11-04)
+
+- Windows service: add `golang.org/x/sys` (Windows-only build tag) as the server's single dependency.
+- Redis 8 bundled capabilities (vector sets, JSON, Query Engine, time series, probabilistic): deferred until after sub-project 3; each gets its own spec.
+- Execution: subagent-driven, task by task with per-task review.

@@ -343,7 +343,7 @@
 
 **Files:**
 - Create: `scripts/test.ps1`, `cmd/distcache-server/service_windows.go`, `cmd/distcache-server/service_other.go`, `test/e2e/windows_test.go`
-- Modify: `internal/server/propagate.go:235-280` (AOF rewrite rename), `internal/server/persistence.go:100-125` (snapshot rename), `cmd/distcache-server/main.go` (shutdown on `os.Interrupt` on all OSes; `--service` flag), `go.mod` (add `golang.org/x/sys` **only if the user confirmed the spec's open question; otherwise skip the service files and document WinSW in README**), `.github/workflows/ci.yml` (Windows job runs `scripts/test.ps1`; differential tests skip there)
+- Modify: `internal/server/propagate.go:235-280` (AOF rewrite rename), `internal/server/persistence.go:100-125` (snapshot rename), `cmd/distcache-server/main.go` (shutdown on `os.Interrupt` on all OSes; `--service` flag), `go.mod` (add `golang.org/x/sys`, confirmed in spec section 10), `.github/workflows/ci.yml` (Windows job runs `scripts/test.ps1`; differential tests skip there)
 
 **Interfaces:**
 - Produces: `func runService(name string, run func(stop <-chan struct{}) error) error` (windows: `svc.Run`; other OSes: returns an error "service mode is only supported on Windows"); CLI `distcache-server --service install|uninstall|run [--service-name DistCache] [config args...]`.
