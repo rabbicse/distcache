@@ -153,6 +153,20 @@ type Keyspace struct {
 	// LFULogFactor and LFUDecayTime mirror the config values.
 	LFULogFactor atomic.Int64
 	LFUDecayTime atomic.Int64
+
+	// now is the data-path clock (expiry, LRU/LFU). It is set once before the
+	// server starts and never mutated afterwards, so it needs no guard.
+	now func() time.Time
+}
+
+// Now returns the current time according to the keyspace clock.
+func (ks *Keyspace) Now() time.Time { return ks.now() }
+
+// SetClock replaces the keyspace clock. It must be called before the
+// keyspace is shared between goroutines (i.e. before the server starts).
+func (ks *Keyspace) SetClock(now func() time.Time) {
+	ks.now = now
+	ks.Clock.Store(uint32(now().Unix()))
 }
 
 // New creates a keyspace with nshards shards (power of two) and ndb DBs.
@@ -167,6 +181,7 @@ func New(nshards, ndb int) *Keyspace {
 		seed:    maphash.MakeSeed(),
 		sizes:   make([]atomic.Int64, ndb),
 		expires: make([]atomic.Int64, ndb),
+		now:     time.Now,
 	}
 	for i := range ks.shards {
 		sh := &Shard{dbs: make([]dbShard, ndb)}
@@ -175,7 +190,7 @@ func New(nshards, ndb int) *Keyspace {
 		}
 		ks.shards[i] = sh
 	}
-	ks.Clock.Store(uint32(time.Now().Unix()))
+	ks.Clock.Store(uint32(ks.now().Unix()))
 	ks.LFULogFactor.Store(10)
 	ks.LFUDecayTime.Store(1)
 	return ks
@@ -284,12 +299,12 @@ func (ks *Keyspace) ExpiresCount(db int) int64 { return ks.expires[db].Load() }
 
 const lfuInitVal = 5
 
-func lfuMinutes() uint32 { return uint32(time.Now().Unix()/60) & 65535 }
+func (ks *Keyspace) lfuMinutes() uint32 { return uint32(ks.now().Unix()/60) & 65535 }
 
 func (ks *Keyspace) lfuDecr(word uint32) uint32 {
 	ldt := word >> 8
 	counter := word & 255
-	now := lfuMinutes()
+	now := ks.lfuMinutes()
 	var elapsed uint32
 	if now >= ldt {
 		elapsed = now - ldt
@@ -324,14 +339,14 @@ func (ks *Keyspace) touch(e *Entry) {
 			counter++
 		}
 	}
-	e.lfu.Store(lfuMinutes()<<8 | counter)
+	e.lfu.Store(ks.lfuMinutes()<<8 | counter)
 }
 
 // NewEntry creates an entry with initialised access metadata.
 func (ks *Keyspace) NewEntry(v any) *Entry {
 	e := &Entry{Value: v}
 	e.lru.Store(ks.Clock.Load())
-	e.lfu.Store(lfuMinutes()<<8 | lfuInitVal)
+	e.lfu.Store(ks.lfuMinutes()<<8 | lfuInitVal)
 	return e
 }
 

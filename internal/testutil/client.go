@@ -133,19 +133,37 @@ func Render(v resp.Value, sorted bool) string {
 	return fmt.Sprintf("?%c", v.Type)
 }
 
+// Options configures StartServerOpts.
+type Options struct {
+	// Mutate, when non-nil, adjusts the config before the server is built.
+	Mutate func(c *config.Config)
+	// Clock, when non-nil, replaces the server's data-path clock before Start.
+	Clock func() time.Time
+}
+
 // StartServer starts an in-process DistCache on a random port and returns
 // its address. mutate can adjust the config.
 func StartServer(t testing.TB, mutate func(c *config.Config)) (*server.Server, string) {
+	t.Helper()
+	return StartServerOpts(t, Options{Mutate: mutate})
+}
+
+// StartServerOpts starts an in-process DistCache on a random port configured
+// by o and returns it with its address. The server is shut down on cleanup.
+func StartServerOpts(t testing.TB, o Options) (*server.Server, string) {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Bind = []string{"127.0.0.1"}
 	cfg.Port = 0
 	cfg.Dir = t.TempDir()
 	cfg.Save = nil
-	if mutate != nil {
-		mutate(cfg)
+	if o.Mutate != nil {
+		o.Mutate(cfg)
 	}
 	s := server.New(cfg, nil)
+	if o.Clock != nil {
+		s.SetClock(o.Clock)
+	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.Start() }()
 	select {

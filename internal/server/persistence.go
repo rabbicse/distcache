@@ -62,7 +62,7 @@ func (s *Server) loadKey(db int, key string, v any, exp int64) bool {
 	if db >= s.ks.NumDB {
 		return false
 	}
-	now := time.Now().UnixMilli()
+	now := s.Now().UnixMilli()
 	if exp != 0 && exp <= now && !s.repl.isReplica() {
 		return false
 	}

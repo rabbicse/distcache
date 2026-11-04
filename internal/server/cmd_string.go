@@ -4,7 +4,6 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/rabbicse/distcache/internal/storage"
 )
@@ -56,7 +55,7 @@ func (c *Ctx) parseExpireArg(unit string, raw []byte, cmdName string) (int64, bo
 		ms = n * 1000
 	}
 	if unit == "ex" || unit == "px" {
-		now := time.Now().UnixMilli()
+		now := c.NowMs()
 		if ms > math.MaxInt64-now {
 			return bad()
 		}

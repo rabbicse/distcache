@@ -239,7 +239,7 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 			hasLocks = true
 		}
 		for {
-			ctx.DB.Now = time.Now().UnixMilli()
+			ctx.DB.Now = s.Now().UnixMilli()
 			s.runHandler(ctx)
 			if !ctx.blocked {
 				break
@@ -306,7 +306,7 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 }
 
 func (s *Server) newDB(c *Client, write bool) *storage.DB {
-	db := &storage.DB{KS: s.ks, Write: write, Now: time.Now().UnixMilli()}
+	db := &storage.DB{KS: s.ks, Write: write, Now: s.Now().UnixMilli()}
 	if c != nil {
 		db.Idx = c.db
 		db.NoTouch = c.noTouch

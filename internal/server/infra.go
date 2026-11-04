@@ -111,10 +111,13 @@ func (s *Server) waitBlocked(c *Client, w *waiter, ctx *Ctx) int {
 	s.stats.totalBlocking.Add(1)
 	var timer <-chan time.Time
 	if ctx.blockTimeout > 0 {
-		remaining := ctx.blockTimeout - time.Now().UnixMilli()
+		remaining := ctx.blockTimeout - ctx.s.Now().UnixMilli()
 		if remaining <= 0 {
 			return blockTimeout
 		}
+		// The deadline is measured on the injected clock, but the wait uses a
+		// real timer: a fake clock does not drive timers, so tests that block
+		// rely on real elapsed time (or an explicit wake-up) to finish.
 		t := time.NewTimer(time.Duration(remaining) * time.Millisecond)
 		defer t.Stop()
 		timer = t.C
@@ -191,7 +194,7 @@ func (c *Ctx) parseTimeout(i int, unitMs bool) (int64, bool) {
 	if ms == 0 {
 		return 0, true
 	}
-	return time.Now().UnixMilli() + int64(ms+0.5), true
+	return c.NowMs() + int64(ms+0.5), true
 }
 
 // ---- WATCH registry ----

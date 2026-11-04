@@ -625,7 +625,7 @@ func (s *Server) resetStats() {
 }
 
 func cmdTime(c *Ctx) {
-	now := time.Now()
+	now := c.s.Now()
 	c.W.WriteArrayLen(2)
 	c.W.WriteBulkString(strconv.FormatInt(now.Unix(), 10))
 	c.W.WriteBulkString(strconv.FormatInt(int64(now.Nanosecond()/1000), 10))

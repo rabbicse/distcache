@@ -140,6 +140,15 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 	return s
 }
 
+// SetClock replaces the data-path clock used for expiry, TTLs, LRU/LFU and
+// stream IDs. Call it before Start; it delegates to the keyspace so there is
+// a single source of truth. Wall-clock observability (client ages, slowlog,
+// uptime, latency) keeps using real time.
+func (s *Server) SetClock(now func() time.Time) { s.ks.SetClock(now) }
+
+// Now returns the current data-path time (see SetClock).
+func (s *Server) Now() time.Time { return s.ks.Now() }
+
 // Config returns the live configuration.
 func (s *Server) Config() *config.Config { return s.cfg }
 
@@ -319,7 +328,7 @@ func (s *Server) cron() {
 		}
 		loops++
 		now := time.Now()
-		s.ks.Clock.Store(uint32(now.Unix()))
+		s.ks.Clock.Store(uint32(s.Now().Unix()))
 		s.ks.LFULogFactor.Store(s.cfg.LFULogFactor.Load())
 		s.ks.LFUDecayTime.Store(s.cfg.LFUDecayTime.Load())
 		if s.cfg.ActiveExpire.Load() && !s.repl.isReplica() && !s.loading.Load() {

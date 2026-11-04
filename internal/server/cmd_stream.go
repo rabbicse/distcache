@@ -4,7 +4,6 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/rabbicse/distcache/internal/ds"
 	"github.com/rabbicse/distcache/internal/resp"
@@ -240,7 +239,7 @@ func cmdXAdd(c *Ctx) {
 	last := s.LastID
 	switch {
 	case auto:
-		ms := uint64(time.Now().UnixMilli())
+		ms := uint64(c.NowMs())
 		if ms > last.Ms {
 			id = ds.StreamID{Ms: ms}
 		} else {
@@ -655,7 +654,7 @@ func xreadGeneric(c *Ctx, group bool) {
 			}
 		}
 		if blockMs > 0 {
-			deadline = time.Now().UnixMilli() + blockMs
+			deadline = c.NowMs() + blockMs
 		}
 		c.blockState = st
 		c.blockDeadlineMs = deadline
@@ -693,7 +692,7 @@ func xreadGeneric(c *Ctx, group bool) {
 			continue
 		}
 		g := s.Groups[groupName]
-		now := time.Now().UnixMilli()
+		now := c.NowMs()
 		cons, _ := g.Consumer(consumer, now, true)
 		cons.SeenTime = now
 		if st.ids[j] == ds.MaxStreamID {
@@ -963,7 +962,7 @@ func cmdXGroup(c *Ctx) {
 		if !ok {
 			return
 		}
-		if _, created := g.Consumer(c.Arg(4), time.Now().UnixMilli(), true); created {
+		if _, created := g.Consumer(c.Arg(4), c.NowMs(), true); created {
 			c.Dirty(1)
 			c.W.WriteInt(1)
 		} else {
@@ -1069,7 +1068,7 @@ func cmdXPending(c *Ctx) {
 	if !ok {
 		return
 	}
-	now := time.Now().UnixMilli()
+	now := c.NowMs()
 	if !extended {
 		ids := g.PendingIDs()
 		c.W.WriteArrayLen(4)
@@ -1139,7 +1138,7 @@ func cmdXClaim(c *Ctx) {
 		}
 		ids = append(ids, id)
 	}
-	now := time.Now().UnixMilli()
+	now := c.NowMs()
 	deliveryTime := int64(-1)
 	retry := int64(-1)
 	force, justID := false, false
@@ -1289,7 +1288,7 @@ func cmdXAutoClaim(c *Ctx) {
 	if !ok {
 		return
 	}
-	now := time.Now().UnixMilli()
+	now := c.NowMs()
 	cons, _ := g.Consumer(consumer, now, true)
 	cons.SeenTime = now
 	var claimed []ds.StreamEntry
@@ -1371,7 +1370,7 @@ func cmdXInfo(c *Ctx) {
 		c.Err(errNoSuchKey)
 		return
 	}
-	now := time.Now().UnixMilli()
+	now := c.NowMs()
 	switch sub {
 	case "stream":
 		full := len(c.Args) >= 4 && c.Is(3, "full")
