@@ -85,6 +85,7 @@ func (c *Client) ReadSnapshot() ([]byte, error) {
 	if !strings.HasPrefix(line, "$") || err != nil || n < 0 {
 		return nil, fmt.Errorf("snapshot header: got %q, want $<len>", line)
 	}
+	defer func() { _ = c.Conn.SetReadDeadline(time.Time{}) }() // best-effort reset
 	return c.r.ReadRaw(n)
 }
 

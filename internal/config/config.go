@@ -245,6 +245,8 @@ func Default() *Config {
 	c.StopWritesOnBgsave.Store(true)
 	c.BusyReplyThreshold.Store(5000)
 	c.ClientQueryBufLimit.Store(1 << 30)
+	// LuaTimeLimit points into c itself, so a Config must never be copied
+	// by value (it also holds atomics); always pass *Config.
 	c.LuaTimeLimit = &c.BusyReplyThreshold
 	c.registerParams()
 	return c

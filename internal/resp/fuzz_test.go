@@ -153,3 +153,19 @@ func FuzzReadCommand(f *testing.F) {
 		}
 	})
 }
+
+// TestReadValue_MaxMultiBulk checks the aggregate limit is the Reader's own
+// field, so internal readers can raise it and clients can be held lower.
+func TestReadValue_MaxMultiBulk(t *testing.T) {
+	in := "*3\r\n:1\r\n:2\r\n:3\r\n"
+	r := NewReader(bytes.NewReader([]byte(in)), 0)
+	r.MaxMultiBulk = 2
+	if _, err := r.ReadValue(); err == nil {
+		t.Error("limit 2: got nil error, want protocol error")
+	}
+	r = NewReader(bytes.NewReader([]byte(in)), 0)
+	r.MaxMultiBulk = 3
+	if v, err := r.ReadValue(); err != nil || len(v.Elems) != 3 {
+		t.Errorf("limit 3: got %d elems, %v; want 3, nil", len(v.Elems), err)
+	}
+}

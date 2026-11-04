@@ -87,7 +87,8 @@ func (s *Server) NewSession() *Session {
 	c.multiLen.Store(-1)
 	ss.c = c
 	ss.r = resp.NewReader(ss.buf, 4096)
-	ss.r.MaxBulkLen = 1 << 62
+	ss.r.MaxBulkLen = resp.Unlimited
+	ss.r.MaxMultiBulk = resp.Unlimited
 	return ss
 }
 

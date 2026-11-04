@@ -241,6 +241,13 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 		// waiter is registered on the first block and kept across retries so
 		// the client keeps its FIFO position on the keys.
 		var waiter *waiter
+		// Deferred so a recovered handler panic cannot leave a dead waiter
+		// at the head of a key's queue.
+		defer func() {
+			if waiter != nil {
+				s.blocker.unregister(waiter)
+			}
+		}()
 		for {
 			ctx.DB.Now = s.Now().UnixMilli()
 			s.runHandler(ctx)
@@ -293,9 +300,6 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 		}
 		if barrier {
 			s.ks.ReleaseSnapshots()
-		}
-		if waiter != nil {
-			s.blocker.unregister(waiter)
 		}
 	}
 	dur := time.Since(start)

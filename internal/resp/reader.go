@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"strconv"
 )
 
@@ -30,16 +31,24 @@ const (
 
 // Reader reads RESP requests from a connection.
 type Reader struct {
-	br         *bufio.Reader
+	br *bufio.Reader
+	// MaxBulkLen caps bulk string lengths (proto-max-bulk-len).
 	MaxBulkLen int64
+	// MaxMultiBulk caps aggregate lengths. Internal readers of trusted data
+	// (Lua reply conversion, AOF loading, in-process sessions) raise it.
+	MaxMultiBulk int64
 }
+
+// Unlimited is a MaxBulkLen/MaxMultiBulk value for readers of trusted,
+// server-generated data.
+const Unlimited = 1 << 62
 
 // NewReader wraps r with a buffered reader of the given size.
 func NewReader(r io.Reader, size int) *Reader {
 	if size <= 0 {
 		size = 16 * 1024
 	}
-	return &Reader{br: bufio.NewReaderSize(r, size), MaxBulkLen: DefaultMaxBulkLen}
+	return &Reader{br: bufio.NewReaderSize(r, size), MaxBulkLen: DefaultMaxBulkLen, MaxMultiBulk: DefaultMaxMultiBulk}
 }
 
 // Buffered returns the number of bytes that can be read without blocking.
@@ -102,7 +111,7 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 		return nil, err
 	}
 	n, ok := parseInt(line)
-	if !ok || n > DefaultMaxMultiBulk {
+	if !ok || n > r.MaxMultiBulk {
 		return nil, &ProtocolError{"invalid multibulk length"}
 	}
 	if n <= 0 {
@@ -194,7 +203,7 @@ func (r *Reader) ReadValue() (Value, error) {
 		}
 	case '*', '~', '>', '%', '|':
 		n, ok := parseInt(line)
-		if !ok || n > DefaultMaxMultiBulk {
+		if !ok || n > r.MaxMultiBulk {
 			return v, &ProtocolError{"invalid multibulk length"}
 		}
 		if n < 0 {
@@ -238,7 +247,7 @@ func (r *Reader) readBulk(n int64) ([]byte, error) {
 	for remaining := n + 2; remaining > 0; {
 		chunk := min(remaining, maxPrealloc)
 		start := len(buf)
-		buf = append(buf, make([]byte, chunk)...)
+		buf = slices.Grow(buf, int(chunk))[:start+int(chunk)]
 		if _, err := io.ReadFull(r.br, buf[start:]); err != nil {
 			return nil, err
 		}

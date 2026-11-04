@@ -356,7 +356,8 @@ func (s *Server) loadAOF(path string) error {
 	fake.name.Store("aof-loader")
 	fake.lastCmd.Store("")
 	r := resp.NewReader(br, 1<<16)
-	r.MaxBulkLen = 1 << 62
+	r.MaxBulkLen = resp.Unlimited
+	r.MaxMultiBulk = resp.Unlimited
 	cmds := 0
 	var inMulti bool
 	lastGood := cr.n - int64(br.Buffered())

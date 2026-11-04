@@ -268,3 +268,13 @@ func TestFunction_DumpRestore(t *testing.T) {
 		testutil.S("-ERR payload version or checksum are wrong", "FUNCTION", "RESTORE", "garbage"),
 	})
 }
+
+// A script may return more elements than a client aggregate may hold: the
+// internal reply-conversion reader must not apply the client limit.
+func TestScripting_ReplyLargerThanMultiBulkLimit(t *testing.T) {
+	_, addr := testutil.StartServer(t, nil)
+	c := testutil.MustDial(t, addr)
+	script := "for i = 1, 1100 do local t = {} for j = 1, 1000 do t[j] = 'x' end " +
+		"redis.call('RPUSH', KEYS[1], unpack(t)) end return #redis.call('LRANGE', KEYS[1], 0, -1)"
+	testutil.RunScript(t, c, []testutil.Step{testutil.S(":1100000", "EVAL", script, "1", "big")})
+}
