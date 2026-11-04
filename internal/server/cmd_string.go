@@ -512,8 +512,10 @@ func formatLongDouble(f float64) string {
 
 func cmdIncrByFloat(c *Ctx) {
 	key := c.Arg(1)
+	// Like Redis's string2ld, an infinite increment parses; the sum check
+	// below then rejects it.
 	incr, ok := parseFloat(c.Args[2])
-	if !ok || math.IsInf(incr, 0) {
+	if !ok {
 		c.Err(errNotFloat)
 		return
 	}
@@ -547,6 +549,22 @@ func cmdIncrByFloat(c *Ctx) {
 }
 
 func cmdLCS(c *Ctx) {
+	// Redis checks both key types before parsing options and reports a
+	// non-string with its own error rather than WRONGTYPE.
+	var vals [2][]byte
+	for i := range vals {
+		e := c.Lookup(c.Arg(i + 1))
+		if e == nil {
+			continue
+		}
+		b, isStr := e.Value.([]byte)
+		if !isStr {
+			c.Err("ERR The specified keys must contain string values")
+			return
+		}
+		vals[i] = b
+	}
+	a, b := vals[0], vals[1]
 	var getLen, getIdx, withMatchLen bool
 	var minMatch int64
 	for i := 3; i < len(c.Args); i++ {
@@ -573,16 +591,6 @@ func cmdLCS(c *Ctx) {
 			return
 		}
 	}
-	a, ea, ok := c.getStr(c.Arg(1))
-	if !ok {
-		return
-	}
-	b, eb, ok := c.getStr(c.Arg(2))
-	if !ok {
-		return
-	}
-	_ = ea
-	_ = eb
 	if getIdx && getLen {
 		c.Err("ERR If you want both the length and indexes, please just use IDX.")
 		return

@@ -233,7 +233,6 @@ func TestStringCommandsDifferential(t *testing.T) {
 
 // Redis's string2ld accepts "inf"; incrbyfloatCommand then rejects the sum.
 func TestStringCommands_IncrByFloatInf(t *testing.T) {
-	t.Skip("known bug B5: INCRBYFLOAT k inf replies 'value is not a valid float' (cmd_string.go cmdIncrByFloat)")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S("-ERR increment would produce NaN or Infinity", "INCRBYFLOAT", "f", "inf"),
@@ -243,7 +242,6 @@ func TestStringCommands_IncrByFloatInf(t *testing.T) {
 
 // Redis's lcsCommand reports a non-string key with its own error, not WRONGTYPE.
 func TestStringCommands_LCSWrongType(t *testing.T) {
-	t.Skip("known bug B6: LCS on a non-string key replies WRONGTYPE (cmd_string.go cmdLCS)")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S(":1", "LPUSH", "lst", "a"),
