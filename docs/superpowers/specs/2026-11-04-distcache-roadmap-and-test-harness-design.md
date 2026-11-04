@@ -9,8 +9,12 @@ DistCache is a Redis-compatible server in Go. The project serves four purposes a
 
 1. **Learning and portfolio** — the code and docs must explain distributed-systems and high-performance server design clearly enough to teach from.
 2. **Professional production use** — correctness, durability and operability are first-class.
-3. **Drop-in Redis replacement** — RESP2/RESP3 wire compatibility with Redis 7.4 is a hard constraint. Any existing Redis client, in any language, must work unchanged. No custom wire protocol.
+3. **Drop-in Redis replacement** — RESP2/RESP3 wire compatibility with Redis 8.4 is a hard constraint. Any existing Redis client, in any language, must work unchanged. No custom wire protocol.
 4. **Higher throughput than Redis on one machine** — Redis executes commands on a single thread; DistCache executes them in parallel on all cores. The goal is to actually realise that advantage, measured against a real `redis-server` on the same hardware.
+
+**Compatibility target: Redis 8.4** (raised from 7.4 on 2026-11-04). The core command set and reply formats tracked are those of Redis Open Source 8.4. Redis 8 bundles former modules (JSON, Query Engine, time series, probabilistic types) and adds vector sets; these are listed as gaps (section 2.1) and scheduled individually rather than assumed. The exact 8.0→8.4 command delta must be verified against the 8.4 release notes and `COMMAND DOCS` of a real `redis-server` 8.4 at the start of each sub-project, since this spec was written from source reading, not the release notes.
+
+**Platforms: Linux, macOS and Windows Server** (Windows Server 2019+ / Windows 10+, amd64 and arm64). All three are first-class: CI runs the full unit/integration/e2e suite on each. See section 4.5 for the Windows-specific work.
 
 Explicitly out of scope: client-side caching (CLIENT TRACKING) — treated as a separate problem; a custom binary protocol — rejected because it would require bespoke SDKs in four languages and the measured bottleneck is not RESP parsing.
 
@@ -20,7 +24,7 @@ Horizontal scaling will follow the Redis Cluster *client* contract (16384 hash s
 
 ### 2.1 Feature coverage (good)
 
-247 commands are registered, covering every Redis 7.4 data type including hash-field TTL, functions, sharded pub/sub, RESP3, PSYNC2-style replication with backlog, WAIT/WAITAOF, keyspace notifications. Remaining gaps:
+247 commands are registered, covering every Redis 7.4 data type (Redis 8.4 delta still to verify) including hash-field TTL, functions, sharded pub/sub, RESP3, PSYNC2-style replication with backlog, WAIT/WAITAOF, keyspace notifications. Remaining gaps:
 
 | Gap | Status today |
 |---|---|
@@ -29,6 +33,8 @@ Horizontal scaling will follow the Redis Cluster *client* contract (16384 hash s
 | Automatic AOF rewrite, multi-part AOF, `min-replicas-to-write` | absent |
 | LATENCY, DEBUG, MODULE | canned replies |
 | TLS | absent |
+| Redis 8.x additions: vector sets (`VADD`, `VSIM`, …), JSON (`JSON.*`), Query Engine (`FT.*`), time series (`TS.*`), probabilistic (`BF.*`, `CF.*`, `CMS.*`, `TOPK.*`, `TDIGEST.*`), and any 8.2/8.4 core-command additions | absent except `HGETDEL/HGETEX/HSETEX`; exact 8.4 list to be verified against a real 8.4 server |
+| Windows runtime behaviour | compiles (`GOOS=windows go vet` passes) but untested; see 4.5 |
 | Tests | 3 Lua interpreter tests; zero server/storage/RESP tests; `internal/testutil` unused; no benchmarks, Makefile, CI, Dockerfile |
 
 ### 2.2 Throughput ceiling (the real problem)
@@ -88,7 +94,7 @@ Non-goals for this sub-project: any performance change beyond the two bug fixes;
 |---|---|---|---|
 | Unit | `internal/<pkg>/*_test.go` beside the code | Plain `go test`; fuzz targets for RESP reader and glob matcher | always, `-race` |
 | Integration (command families) | `internal/server/*_test.go` | In-process server via `testutil.StartServer`, real TCP, table-driven command scripts | always, `-race` |
-| Differential vs Redis | same files, `t.Skip` when `redis-server` is not on PATH or `DISTCACHE_SKIP_REDIS` is set | Same script run against both servers, `testutil.Render` output compared | always; CI job provides a `redis:7.4` service container |
+| Differential vs Redis | same files, `t.Skip` when `redis-server` is not on PATH or `DISTCACHE_SKIP_REDIS` is set | Same script run against both servers, `testutil.Render` output compared | always; CI job provides a `redis:8.4` service container |
 | End-to-end | `test/e2e/*_test.go` (package `e2e`) | Multiple in-process servers (master + replica, restart with AOF/snapshot), real client library (`go-redis`) as a second opinion on wire compatibility | always, `-race` |
 | Load | `cmd/distcache-bench` + `make bench` | Network load generator; results written to `bench/results/` | manual (`make bench`), nightly CI optional later |
 | Microbenchmark | `internal/server/bench_test.go` | `Benchmark*` calling the in-process runner, `b.ReportAllocs()` | manual (`make microbench`) |
@@ -154,7 +160,7 @@ A Go load generator with the redis-benchmark option subset `-h -p -c -n -P -d -t
 
 - `Makefile`: `build`, `test` (unit+integration, `-race`), `test-e2e`, `test-all`, `lint` (golangci-lint), `bench`, `microbench`, `cover` (HTML report), `docker`.
 - `.golangci.yml` with a conservative set (govet, staticcheck, errcheck, gosimple, ineffassign, unused).
-- `.github/workflows/ci.yml`: matrix on Go 1.24, Linux + macOS; `redis:7.4` service on Linux for differential tests; race detector; coverage artifact.
+- `.github/workflows/ci.yml`: matrix on Go 1.27, Linux + macOS + Windows; `redis:8.4` service on Linux for differential tests; race detector; coverage artifact.
 - `Dockerfile`: multi-stage, distroless runtime, exposes 6379, `distcache.conf` optional.
 
 #### J. Bug fixes
@@ -166,11 +172,23 @@ A Go load generator with the redis-benchmark option subset `-h -p -c -n -P -d -t
 
 Accurate description of what exists: features table, quick start, configuration (redis.conf style), compatibility statement with the divergence allowlist, how to run tests and benchmarks, project layout, roadmap pointing at this spec. Diagrams in Mermaid (open question: the user mentioned a tool "archify" for end-to-end flow diagrams; until clarified, Mermaid is used and diagrams are kept in a single place so they can be swapped).
 
+### 4.5 Windows Server support
+
+Findings: the module builds for Windows today. Known runtime risks:
+- `os.Rename` over a file that is still open fails on Windows; AOF rewrite (`propagate.go:273`) renames onto the live AOF and snapshot save (`persistence.go:122`) onto the dump file. Fix: close (or reopen with `FILE_SHARE_DELETE`-equivalent semantics) before rename, then reopen; covered by an e2e test run on Windows.
+- Signals: `SIGTERM` is never delivered on Windows; Ctrl+C / Ctrl+Break arrive as `os.Interrupt`. Shutdown must hook `os.Interrupt` on all platforms (already does via `SIGINT`) and console-close events.
+- Running as a **Windows service** needs the Service Control Manager API. Options: (a) add `golang.org/x/sys/windows/svc` — Go-team maintained, the only dependency, Windows-only build tag; (b) stay zero-dependency and document running under WinSW/NSSM. Default: (a), since `x/sys` is part of the Go project; decision recorded as open question until the user confirms.
+- Unix sockets: supported by Go on Windows 10 1803+ / Server 2019+; keep the option, test it on Windows CI.
+- File paths in config (`dir`, `dbfilename`) use `filepath` everywhere; tests use `t.TempDir()`.
+- Differential tests skip on Windows (no official `redis-server` build); all other suites run.
+
+Deliverables in sub-project 1: CI job on `windows-latest`; `make`-free equivalents (`go test` commands documented, plus `scripts/test.ps1`); rename fix; `cmd/distcache-server` service mode behind `//go:build windows` with `--service install|uninstall|run`; Windows release zip in the Docker/CI pipeline.
+
 ### 4.4 Success criteria
 
-- `make test-all` green with `-race` on Linux and macOS.
+- `make test-all` green with `-race` on Linux, macOS and Windows (Windows runs via `scripts/test.ps1`).
 - Every registered command appears in at least one integration test (enforced by the coverage gate).
-- Differential suite passes against `redis-server` 7.4 with every divergence listed in the allowlist.
+- Differential suite passes against `redis-server` 8.4 with every divergence listed in the allowlist.
 - Line coverage ≥ 80% for `internal/resp`, `internal/storage`, `internal/ds`, `internal/config`; ≥ 60% for `internal/server`.
 - `bench/results/` contains a baseline for DistCache and Redis on the same machine.
 - Handler panic test and writer-race test (run with `-race`) pass.
@@ -215,3 +233,5 @@ Guides live in `docs/guides/NN-<topic>.md`, one per subsystem (RESP, dispatch an
 
 - "archify" for end-to-end flow diagrams: unknown tool; Mermaid assumed until clarified.
 - Java client choice (Jedis vs Lettuce) — decide in sub-project 5.
+- Windows service: accept `golang.org/x/sys` as the server's single dependency (default), or stay zero-dep and document WinSW/NSSM.
+- Which Redis 8 bundled capabilities (vector sets, JSON, Query Engine, time series, probabilistic) are in scope, and in which sub-project.

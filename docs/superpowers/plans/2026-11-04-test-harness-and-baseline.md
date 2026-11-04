@@ -6,18 +6,18 @@
 
 **Architecture:** Tests reuse the existing `internal/testutil` client and the AOF loader's fake-client pattern to run commands in-process; a new `Server.Exec`/`Session` API exposes that path. Time becomes injectable through one `Now func() time.Time` on `Server` and `Keyspace` so expiry tests are deterministic. A Go load generator with redis-benchmark's flag subset runs identically against DistCache and Redis.
 
-**Tech Stack:** Go 1.24 stdlib only in the server module; `github.com/redis/go-redis/v9` only inside the separate `test/e2e` module; golangci-lint; GitHub Actions; Docker (distroless).
+**Tech Stack:** Go 1.27 stdlib only in the server module; `github.com/redis/go-redis/v9` only inside the separate `test/e2e` module; golangci-lint; GitHub Actions; Docker (distroless).
 
 **Spec:** `docs/superpowers/specs/2026-11-04-distcache-roadmap-and-test-harness-design.md` (section 4)
 
 ## Global Constraints
 
 - Server module (`github.com/rabbicse/distcache`) keeps **zero** `require` lines in `go.mod`.
-- Go `1.24`; all tests pass with `-race` on Linux and macOS.
-- Redis compatibility target is `7.4`; differential tests skip (not fail) when `redis-server` is absent or `DISTCACHE_SKIP_REDIS` is set.
+- Go `1.27` (`toolchain go1.27.3`, already set in go.mod); all tests pass with `-race` on Linux, macOS and Windows Server.
+- Redis compatibility target is `8.4`; differential tests skip (not fail) when `redis-server` is absent or `DISTCACHE_SKIP_REDIS` is set.
 - No performance changes in this sub-project beyond the two bug fixes (spec 4.1).
 - Coverage floors: ≥ 80 % lines for `internal/resp`, `internal/storage`, `internal/ds`, `internal/config`; ≥ 60 % for `internal/server`.
-- Commit messages end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+- Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - **Go naming and documentation (applies to every file touched):** identifiers follow Effective Go / Go Code Review Comments — MixedCaps, short receiver names, no stutter (`server.Server`, not `server.ServerStruct`), acronyms uppercased (`ID`, `AOF`, `TTL`, `RESP`), no single-letter names beyond loop indices and receivers, no abbreviations that are not idiomatic (`cfg`, `ctx`, `err`, `buf` are fine; `prop`, `repl`, `ks` are not — rename to `propagator`, `replication`, `keyspace` when a task modifies the declaring file). Every exported identifier has a doc comment starting with its name; every unexported type and non-trivial function has a comment saying *why* it exists; each file starts with a short comment on its responsibility. Comments are full sentences. Tests use `TestXxx_Scenario` naming and `t.Run` subtests for tables. `make lint` must pass.
 
 ## Review Focus
@@ -49,8 +49,8 @@
   - `bench`, `microbench`: placeholders echoing "added in Task 15/16"; replaced there.
   - `docker`: `docker build -t distcache:dev .`
 - [ ] **Step 2: Write `.golangci.yml`** enabling exactly: `govet, staticcheck, errcheck, gosimple, ineffassign, unused`; exclude `errcheck` for `_ =` patterns is default; set `run.timeout: 5m`.
-- [ ] **Step 3: Write `.github/workflows/ci.yml`**: matrix `os: [ubuntu-latest, macos-latest]`, Go `1.24.x`; steps: checkout, setup-go, `make lint` (ubuntu only, via `golangci/golangci-lint-action`), `make test`, `make test-e2e`; on ubuntu add a `services: redis: image: redis:7.4` block and export `REDIS_SERVER_ADDR=127.0.0.1:6379` (Task 10 teaches `StartRedis` to use it); upload `coverage.out` artifact from `make cover`.
-- [ ] **Step 4: Write `Dockerfile`**: stage 1 `golang:1.24` builds `/out/distcache-server` with `CGO_ENABLED=0`; stage 2 `gcr.io/distroless/static-debian12`, `COPY --from=build /out/distcache-server /distcache-server`, `EXPOSE 6379`, `VOLUME /data`, `ENTRYPOINT ["/distcache-server"]`, `CMD ["--dir","/data"]`. `.dockerignore`: `bin/ coverage.* .git docs`.
+- [ ] **Step 3: Write `.github/workflows/ci.yml`**: matrix `os: [ubuntu-latest, macos-latest, windows-latest]`, Go `1.27.x`; steps: checkout, setup-go, `make lint` (ubuntu only, via `golangci/golangci-lint-action`), `make test`, `make test-e2e`; on ubuntu add a `services: redis: image: redis:8.4` block and export `REDIS_SERVER_ADDR=127.0.0.1:6379` (Task 10 teaches `StartRedis` to use it); upload `coverage.out` artifact from `make cover`.
+- [ ] **Step 4: Write `Dockerfile`**: stage 1 `golang:1.27` builds `/out/distcache-server` with `CGO_ENABLED=0`; stage 2 `gcr.io/distroless/static-debian12`, `COPY --from=build /out/distcache-server /distcache-server`, `EXPOSE 6379`, `VOLUME /data`, `ENTRYPOINT ["/distcache-server"]`, `CMD ["--dir","/data"]`. `.dockerignore`: `bin/ coverage.* .git docs`.
 - [ ] **Step 5: Verify** — Run: `make build && make test && make lint`. Expected: all succeed (lint may list pre-existing findings; fix only trivial ones, otherwise add them to `.golangci.yml` `issues.exclude-rules` with a comment).
 - [ ] **Step 6: Commit** — `git add Makefile .golangci.yml .github Dockerfile .dockerignore .gitignore && git commit -m "build: add Makefile, lint config, CI workflow and Dockerfile"`
 
@@ -253,7 +253,7 @@
 **Files:**
 - Create: `internal/server/cmd_list_test.go`, `cmd_set_test.go`, `cmd_zset_test.go`, `cmd_hash_test.go`, `cmd_stream_test.go`, `cmd_hll_geo_test.go`
 
-- [ ] **Step 1: Write tests** as in Task 11 for every command in these groups. Required specifics: blocking commands via a second `testutil.Client` (`BLPOP` wakes on `LPUSH`, timeout `0.1` returns `(nil-array)`, `BLMOVE`/`BLMPOP`/`BZMPOP`/`BZPOPMIN` wake order FIFO across two blocked clients, `CLIENT UNBLOCK <id> ERROR` → `-UNBLOCKED`); `LPOS RANK/COUNT/MAXLEN`; `LMPOP LEFT/RIGHT COUNT`; `SRANDMEMBER` negative count length; `SPOP count`; `SINTERCARD LIMIT`; `SMOVE`; `ZADD NX/XX/GT/LT/CH/INCR` combos incl. `-ERR XX and NX options at the same time are not compatible`; `ZRANGE BYSCORE/BYLEX/REV/LIMIT/WITHSCORES`; `ZRANGESTORE`; `ZUNION/ZINTER/ZDIFF` with `WEIGHTS/AGGREGATE/WITHSCORES`; `ZINTERCARD`; `ZRANDMEMBER WITHSCORES`; `ZMPOP`; `ZADD` NaN error; hash `HRANDFIELD WITHVALUES`, `HINCRBYFLOAT`, `HSCAN`, field TTL (`HEXPIRE k 1 FIELDS 1 f` → `*[:1]`, fake clock advance, `HGET` nil, `HTTL` → `-2`, `HPERSIST`, `HEXPIRE` with `NX/XX/GT/LT`, `HEXPIRE` on missing field → `-2`), `HGETDEL/HGETEX/HSETEX` compared only if `testutil.RedisVersion >= 8` else allowlisted; streams: `XADD` explicit/auto IDs, `NOMKSTREAM`, `MAXLEN ~`, `MINID`, `LIMIT`, `XRANGE -/+` with exclusive `(`, `XREVRANGE`, `XREAD COUNT/BLOCK` with a second client, `XGROUP CREATE MKSTREAM/ENTRIESREAD`, `XREADGROUP >` and `0`, `XACK`, `XPENDING` summary and extended with `IDLE`, `XCLAIM`/`XAUTOCLAIM JUSTID`, `XINFO STREAM FULL`, `XINFO GROUPS/CONSUMERS` (`Sorted`), `XDEL`, `XTRIM`, `XSETID` with `ENTRIESADDED/MAXDELETEDID`, `XLEN`; geo: `GEOADD NX/XX/CH`, `GEOPOS` precision (compare rounded to 4 decimals via `Sorted` false and an allowlist reason if Redis differs beyond 1e-6), `GEODIST` units, `GEOHASH`, `GEOSEARCH FROMMEMBER/FROMLONLAT BYRADIUS/BYBOX ASC/COUNT ANY/WITHDIST/WITHCOORD`, `GEOSEARCHSTORE STOREDIST`, `GEORADIUS` deprecated forms; HLL: `PFADD` returns 1 then 0, `PFCOUNT` multi-key, `PFMERGE`, `PFCOUNT` on wrong type/invalid HLL `-WRONGTYPE`/`-INVALIDOBJ`.
+- [ ] **Step 1: Write tests** as in Task 11 for every command in these groups. Required specifics: blocking commands via a second `testutil.Client` (`BLPOP` wakes on `LPUSH`, timeout `0.1` returns `(nil-array)`, `BLMOVE`/`BLMPOP`/`BZMPOP`/`BZPOPMIN` wake order FIFO across two blocked clients, `CLIENT UNBLOCK <id> ERROR` → `-UNBLOCKED`); `LPOS RANK/COUNT/MAXLEN`; `LMPOP LEFT/RIGHT COUNT`; `SRANDMEMBER` negative count length; `SPOP count`; `SINTERCARD LIMIT`; `SMOVE`; `ZADD NX/XX/GT/LT/CH/INCR` combos incl. `-ERR XX and NX options at the same time are not compatible`; `ZRANGE BYSCORE/BYLEX/REV/LIMIT/WITHSCORES`; `ZRANGESTORE`; `ZUNION/ZINTER/ZDIFF` with `WEIGHTS/AGGREGATE/WITHSCORES`; `ZINTERCARD`; `ZRANDMEMBER WITHSCORES`; `ZMPOP`; `ZADD` NaN error; hash `HRANDFIELD WITHVALUES`, `HINCRBYFLOAT`, `HSCAN`, field TTL (`HEXPIRE k 1 FIELDS 1 f` → `*[:1]`, fake clock advance, `HGET` nil, `HTTL` → `-2`, `HPERSIST`, `HEXPIRE` with `NX/XX/GT/LT`, `HEXPIRE` on missing field → `-2`), `HGETDEL/HGETEX/HSETEX` compared (Redis 8.4 target); streams: `XADD` explicit/auto IDs, `NOMKSTREAM`, `MAXLEN ~`, `MINID`, `LIMIT`, `XRANGE -/+` with exclusive `(`, `XREVRANGE`, `XREAD COUNT/BLOCK` with a second client, `XGROUP CREATE MKSTREAM/ENTRIESREAD`, `XREADGROUP >` and `0`, `XACK`, `XPENDING` summary and extended with `IDLE`, `XCLAIM`/`XAUTOCLAIM JUSTID`, `XINFO STREAM FULL`, `XINFO GROUPS/CONSUMERS` (`Sorted`), `XDEL`, `XTRIM`, `XSETID` with `ENTRIESADDED/MAXDELETEDID`, `XLEN`; geo: `GEOADD NX/XX/CH`, `GEOPOS` precision (compare rounded to 4 decimals via `Sorted` false and an allowlist reason if Redis differs beyond 1e-6), `GEODIST` units, `GEOHASH`, `GEOSEARCH FROMMEMBER/FROMLONLAT BYRADIUS/BYBOX ASC/COUNT ANY/WITHDIST/WITHCOORD`, `GEOSEARCHSTORE STOREDIST`, `GEORADIUS` deprecated forms; HLL: `PFADD` returns 1 then 0, `PFCOUNT` multi-key, `PFMERGE`, `PFCOUNT` on wrong type/invalid HLL `-WRONGTYPE`/`-INVALIDOBJ`.
 - [ ] **Step 2: Run** `go test -race ./internal/server -run 'List|Set|ZSet|Hash|Stream|HllGeo'` — Expected: PASS; fix DistCache deviations found by the differential run.
 - [ ] **Step 3: Commit** — `git commit -am "test(server): integration + differential tests for collection, stream, geo and HLL commands"`
 
@@ -275,7 +275,7 @@
 ### Task 14: End-to-end tests with go-redis (`test/e2e` module)
 
 **Files:**
-- Create: `test/e2e/go.mod` (module `github.com/rabbicse/distcache/test/e2e`, `go 1.24`, `require github.com/redis/go-redis/v9 v9.7.0`, `replace github.com/rabbicse/distcache => ../..`), `test/e2e/helpers_test.go`, `test/e2e/persistence_test.go`, `test/e2e/replication_test.go`, `test/e2e/compat_test.go`, `test/e2e/resilience_test.go`
+- Create: `test/e2e/go.mod` (module `github.com/rabbicse/distcache/test/e2e`, `go 1.27`, `require github.com/redis/go-redis/v9` (latest v9 at implementation time), `replace github.com/rabbicse/distcache => ../..`), `test/e2e/helpers_test.go`, `test/e2e/persistence_test.go`, `test/e2e/replication_test.go`, `test/e2e/compat_test.go`, `test/e2e/resilience_test.go`
 - Modify: `Makefile` (`test-e2e` real target)
 
 **Interfaces:**
@@ -333,9 +333,27 @@
 **Files:**
 - Modify: `README.md` (full rewrite), `CLAUDE.md` (drop the "README is aspirational" note; add `make` targets and `test/e2e` module note)
 
-- [ ] **Step 1: Write README.md** with sections, in this order: one-paragraph description (Redis 7.4-compatible, Go, stdlib-only, multi-core execution); **Status** table (implemented / partial / planned, from spec 2.1 — cluster, ACL, TLS as planned); **Quick start** (`go run ./cmd/distcache-server`, `redis-cli`, Docker); **Configuration** (redis.conf style, CLI flags, link to `CONFIG GET *`); **Architecture** with one Mermaid diagram of the request path (client → RESP → dispatch → shard locks → handler → propagation) and one of persistence/replication; **Compatibility** (RESP2/RESP3, link to `testutil.KnownDivergences` as the intentional-divergence list, DCSNAP ≠ RDB); **Performance** (how to run `make bench`, link to latest `bench/results/*.md`, a short honest note that pipelining/concurrency is required for high throughput); **Testing** (`make test`, `make test-e2e`, differential tests need `redis-server`, `DISTCACHE_SKIP_REDIS`); **Project layout**; **Roadmap** (six sub-projects, link to the spec); **Credits** — a short list that includes Redis (https://github.com/redis/redis) as the reference implementation and the video https://www.youtube.com/watch?v=sRXIRikME14&t=178s (one neutral line: "inspiration and background"); **License**. Keep the whole file under 250 lines; no claims the code does not support.
+- [ ] **Step 1: Write README.md** with sections, in this order: one-paragraph description (Redis 8.4-compatible, Go, stdlib-only, Linux/macOS/Windows Server, multi-core execution); **Status** table (implemented / partial / planned, from spec 2.1 — cluster, ACL, TLS as planned); **Quick start** (`go run ./cmd/distcache-server`, `redis-cli`, Docker, Windows: zip release + `--service install`); **Configuration** (redis.conf style, CLI flags, link to `CONFIG GET *`); **Architecture** with one Mermaid diagram of the request path (client → RESP → dispatch → shard locks → handler → propagation) and one of persistence/replication; **Compatibility** (RESP2/RESP3, link to `testutil.KnownDivergences` as the intentional-divergence list, DCSNAP ≠ RDB); **Performance** (how to run `make bench`, link to latest `bench/results/*.md`, a short honest note that pipelining/concurrency is required for high throughput); **Testing** (`make test`, `make test-e2e`, differential tests need `redis-server`, `DISTCACHE_SKIP_REDIS`); **Project layout**; **Roadmap** (six sub-projects, link to the spec); **Credits** — a short list that includes Redis (https://github.com/redis/redis) as the reference implementation and the video https://www.youtube.com/watch?v=sRXIRikME14&t=178s (one neutral line: "inspiration and background"); **License**. Keep the whole file under 250 lines; no claims the code does not support.
 - [ ] **Step 2: Verify** every command in README runs: execute the quick start and `make` commands listed. Expected: all succeed.
 - [ ] **Step 3: Commit** — `git commit -am "docs: rewrite README to match the implementation"`
+
+---
+
+### Task 17a: Windows Server support
+
+**Files:**
+- Create: `scripts/test.ps1`, `cmd/distcache-server/service_windows.go`, `cmd/distcache-server/service_other.go`, `test/e2e/windows_test.go`
+- Modify: `internal/server/propagate.go:235-280` (AOF rewrite rename), `internal/server/persistence.go:100-125` (snapshot rename), `cmd/distcache-server/main.go` (shutdown on `os.Interrupt` on all OSes; `--service` flag), `go.mod` (add `golang.org/x/sys` **only if the user confirmed the spec's open question; otherwise skip the service files and document WinSW in README**), `.github/workflows/ci.yml` (Windows job runs `scripts/test.ps1`; differential tests skip there)
+
+**Interfaces:**
+- Produces: `func runService(name string, run func(stop <-chan struct{}) error) error` (windows: `svc.Run`; other OSes: returns an error "service mode is only supported on Windows"); CLI `distcache-server --service install|uninstall|run [--service-name DistCache] [config args...]`.
+
+- [ ] **Step 1: Write failing test** `TestAOFRewriteAndSaveOnWindows` in `test/e2e/windows_test.go` (no build tag — it must pass everywhere): `appendonly yes`, write 1000 keys, `BGREWRITEAOF`, poll until done, `SAVE`, write more, restart server on same dir → all keys present. On Windows today this fails with "Access is denied" from `os.Rename`.
+- [ ] **Step 2: Run** on Windows CI (or a local Windows VM) — Expected: FAIL.
+- [ ] **Step 3: Implement**: before renaming over the live AOF, sync and close `aofFile` under `propagator.mu`, rename, reopen in append mode, and resume; snapshot save writes `tmp`, closes it, then renames (already closed — verify), and on Windows retries `os.Rename` up to 5× with 20 ms backoff for transient sharing violations from antivirus scanners. Shutdown: `signal.Notify(sig, os.Interrupt, syscall.SIGTERM)` (SIGTERM is a no-op on Windows; harmless). Service files per Interfaces.
+- [ ] **Step 4: Write `scripts/test.ps1`**: runs `go vet ./...`, `go test -race -count=1 ./...`, `Push-Location test/e2e; go test -race -count=1 ./...; Pop-Location`, exits non-zero on failure.
+- [ ] **Step 5: Run** `make test-all` locally and the Windows CI job — Expected: PASS on all three OSes.
+- [ ] **Step 6: Commit** — `git commit -am "feat: Windows Server support (safe rename, interrupt shutdown, service mode, CI)"`
 
 ---
 

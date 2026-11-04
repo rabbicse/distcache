@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-DistCache is a Redis-compatible (targets Redis 7.4 command semantics and replies) in-memory server written in Go 1.24 with **no external dependencies** (stdlib only — including its own Lua 5.1 interpreter). The main difference from Redis is that commands execute concurrently across a sharded keyspace instead of on a single thread.
+DistCache is a Redis-compatible (targets Redis 8.4 command semantics and replies) in-memory server written in Go 1.27 for Linux, macOS and Windows Server, with **no external dependencies** (stdlib only — including its own Lua 5.1 interpreter). The main difference from Redis is that commands execute concurrently across a sharded keyspace instead of on a single thread.
 
 Note: README.md is aspirational and out of date — the project structure, YAML config, Prometheus metrics and cluster/consistent-hashing sections do not reflect the code. Trust the code over the README.
 
