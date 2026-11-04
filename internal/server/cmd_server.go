@@ -901,6 +901,10 @@ func cmdACL(c *Ctx) {
 
 func cmdDebug(c *Ctx) {
 	switch strings.ToLower(c.Arg(1)) {
+	case "panic":
+		// Deliberate crash used by resilience tests; invokeHandler recovers it
+		// and replies with an error, so the server keeps running.
+		panic("DEBUG PANIC")
 	case "sleep":
 		if len(c.Args) != 3 {
 			c.WrongSubArgs()

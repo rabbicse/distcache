@@ -11,9 +11,9 @@ build:
 test:
 	go test -race -count=1 ./...
 
-# test/e2e is a separate module created in Task 14; skipped until it exists.
+# test/e2e is a separate module (it depends on go-redis; the server stays stdlib-only).
 test-e2e:
-	@test -d test/e2e || exit 0; cd test/e2e && go test -race -count=1 ./...
+	cd test/e2e && go test -race -count=1 ./...
 
 test-all: test test-e2e
 
