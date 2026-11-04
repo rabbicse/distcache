@@ -462,3 +462,20 @@ func TestDefault_Values(t *testing.T) {
 		t.Error("client-output-buffer-limit default empty")
 	}
 }
+
+// In Redis lua-time-limit is an alias of busy-reply-threshold.
+func TestConfig_LuaTimeLimitAlias(t *testing.T) {
+	c := Default()
+	if err := c.Set("lua-time-limit", "123", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.BusyReplyThreshold.Load(); got != 123 {
+		t.Errorf("busy-reply-threshold got %d, want 123", got)
+	}
+	if err := c.Set("busy-reply-threshold", "456", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Get("lua-time-limit"); len(got) != 1 || got[0][1] != "456" {
+		t.Errorf("lua-time-limit got %v, want 456", got)
+	}
+}

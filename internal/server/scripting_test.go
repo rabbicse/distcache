@@ -154,9 +154,8 @@ func TestScripting_KillBusyScript(t *testing.T) {
 }
 
 // TestScripting_KillBusyScript_LuaTimeLimit: in Redis lua-time-limit is an
-// alias of busy-reply-threshold; here it is a separate, unused setting.
+// alias of busy-reply-threshold, so setting it alone makes a script BUSY.
 func TestScripting_KillBusyScript_LuaTimeLimit(t *testing.T) {
-	t.Skip("known bug B21: lua-time-limit is not an alias of busy-reply-threshold, so it does not make a script BUSY")
 	killBusyScript(t, func(c *config.Config) { c.LuaTimeLimit.Store(100) })
 }
 
