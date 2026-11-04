@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 )
 
@@ -181,22 +182,20 @@ func (r *Reader) ReadValue() (Value, error) {
 		v.Null = true
 	case '$', '=', '!':
 		n, ok := parseInt(line)
-		if !ok {
-			return v, &ProtocolError{"bad bulk length"}
+		if !ok || n > r.MaxBulkLen {
+			return v, &ProtocolError{"invalid bulk length"}
 		}
 		if n < 0 {
 			v.Null = true
 			return v, nil
 		}
-		buf := make([]byte, n+2)
-		if _, err := io.ReadFull(r.br, buf); err != nil {
+		if v.Str, err = r.readBulk(n); err != nil {
 			return v, err
 		}
-		v.Str = buf[:n:n]
 	case '*', '~', '>', '%', '|':
 		n, ok := parseInt(line)
-		if !ok {
-			return v, &ProtocolError{"bad aggregate length"}
+		if !ok || n > DefaultMaxMultiBulk {
+			return v, &ProtocolError{"invalid multibulk length"}
 		}
 		if n < 0 {
 			v.Null = true
@@ -205,11 +204,15 @@ func (r *Reader) ReadValue() (Value, error) {
 		if t == '%' || t == '|' {
 			n *= 2
 		}
-		v.Elems = make([]Value, n)
-		for i := range v.Elems {
-			if v.Elems[i], err = r.ReadValue(); err != nil {
+		// Grow as elements actually arrive so a large declared length on a
+		// short stream cannot force a big up-front allocation.
+		v.Elems = make([]Value, 0, min(n, maxElemPrealloc))
+		for range n {
+			e, err := r.ReadValue()
+			if err != nil {
 				return v, err
 			}
+			v.Elems = append(v.Elems, e)
 		}
 		if t == '|' { // attributes precede the real value; skip them
 			return r.ReadValue()
@@ -218,6 +221,33 @@ func (r *Reader) ReadValue() (Value, error) {
 		return v, ErrUnexpected
 	}
 	return v, nil
+}
+
+// maxPrealloc and maxElemPrealloc cap how many bytes and elements ReadValue
+// allocates before the data has actually been received.
+const (
+	maxPrealloc     = 64 * 1024
+	maxElemPrealloc = 1024
+)
+
+// readBulk reads an n-byte bulk payload followed by CRLF. A payload that is
+// not terminated by CRLF is a protocol error. The buffer grows with the data
+// received rather than trusting the declared length up front.
+func (r *Reader) readBulk(n int64) ([]byte, error) {
+	buf := make([]byte, 0, min(n, maxPrealloc)+2)
+	for remaining := n + 2; remaining > 0; {
+		chunk := min(remaining, maxPrealloc)
+		start := len(buf)
+		buf = append(buf, make([]byte, chunk)...)
+		if _, err := io.ReadFull(r.br, buf[start:]); err != nil {
+			return nil, err
+		}
+		remaining -= chunk
+	}
+	if buf[n] != '\r' || buf[n+1] != '\n' {
+		return nil, &ProtocolError{"bulk string not terminated by CRLF"}
+	}
+	return buf[:n:n], nil
 }
 
 // ReadRaw reads exactly n bytes (used for replication payloads).
@@ -254,6 +284,9 @@ func parseInt(b []byte) (int64, bool) {
 		c := b[i]
 		if c < '0' || c > '9' {
 			return 0, false
+		}
+		if n > (math.MaxInt64-int64(c-'0'))/10 {
+			return 0, false // overflow
 		}
 		n = n*10 + int64(c-'0')
 	}

@@ -91,63 +91,15 @@ var valueSeeds = []string{
 	"=8\r\ntxt:abcd\r\n", "(123\r\n", "!5\r\nerror\r\n",
 }
 
-// maxFuzzLength caps the aggregate/bulk lengths the fuzzer may feed ReadValue.
-const maxFuzzLength = 1 << 20
-
-// hasHugeLengthHeader reports whether data has a line, at the start or after
-// a '\n', that begins with an aggregate or bulk marker (* $ = ! % ~ >) and
-// whose length exceeds maxFuzzLength or overflows. Large integers, doubles and
-// big numbers are deliberately not matched so the fuzzer still explores them.
-func hasHugeLengthHeader(data []byte) bool {
-	for i := 0; i < len(data); i++ {
-		if i > 0 && data[i-1] != '\n' {
-			continue
-		}
-		if !bytes.ContainsRune([]byte("*$=!%~>"), rune(data[i])) {
-			continue
-		}
-		var n int64
-		for _, c := range data[i+1:] {
-			if c < '0' || c > '9' {
-				break
-			}
-			n = n*10 + int64(c-'0')
-			if n > maxFuzzLength {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func TestHasHugeLengthHeader(t *testing.T) {
-	tests := []struct {
-		in   string
-		want bool
-	}{
-		{"*99999999999999999991\n0\n", true},
-		{"$4000000000\r\n", true},
-		{"*1\r\n*2000000\r\n", true},
-		{"*2\r\n:12345678901\r\n", false},
-		{",12345678901234\r\n", false},
-		{"(123456789012345678901234\r\n", false},
-		{"$-1\r\n", false},
-		{"*1048576\r\n", false},
-	}
-	for _, tc := range tests {
-		if got := hasHugeLengthHeader([]byte(tc.in)); got != tc.want {
-			t.Errorf("%q: got %v, want %v", tc.in, got, tc.want)
-		}
-	}
-}
-
 // TestReadValue_HugeLengthRegression is the fuzz crasher "*99999999999999999991\n0\n":
 // ReadValue allocates from an unchecked aggregate or bulk length and panics
 // with "makeslice: len out of range" (or exhausts memory). Redis bounds these
 // with proto-max-bulk-len and the multibulk limit.
 func TestReadValue_HugeLengthRegression(t *testing.T) {
-	t.Skip("known bug: ReadValue does not bound aggregate/bulk lengths and panics in makeslice")
-	for _, in := range []string{"*99999999999999999991\n0\n", "$99999999999999999\r\n", "*4000000000\r\n"} {
+	for _, in := range []string{
+		"*99999999999999999991\n0\n", "$99999999999999999\r\n", "*4000000000\r\n",
+		"|4000000000\r\n", "%4000000000\r\n", "$3\r\nabcXY", "$3\r\nabc\n\r",
+	} {
 		if _, err := NewReader(bytes.NewReader([]byte(in)), 0).ReadValue(); err == nil {
 			t.Errorf("%q: got nil error, want protocol error", in)
 		}
@@ -159,10 +111,6 @@ func FuzzReadValue(f *testing.F) {
 		f.Add([]byte(s))
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		// TODO(B1): remove once TestReadValue_HugeLengthRegression is un-skipped.
-		if hasHugeLengthHeader(data) {
-			t.Skip("ReadValue has no length limit; see TestReadValue_HugeLengthRegression")
-		}
 		v, err := NewReader(bytes.NewReader(data), 0).ReadValue()
 		if err != nil {
 			return
