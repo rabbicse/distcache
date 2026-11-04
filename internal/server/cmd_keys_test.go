@@ -391,7 +391,6 @@ func TestKeysCommands_DumpRestoreRoundTrip(t *testing.T) {
 
 // Redis's RANDOMKEY never returns nil on a non-empty database.
 func TestKeysCommands_RandomKeySingleKey(t *testing.T) {
-	t.Skip("known bug B7: RANDOMKEY returns nil ~2% of the time with one key (cmd_keys.go cmdRandomKey samples 4*shards random shards)")
 	_, addr := testutil.StartServer(t, nil)
 	c := testutil.MustDial(t, addr)
 	testutil.RunScript(t, c, []testutil.Step{testutil.S("+OK", "SET", "c", "1")})

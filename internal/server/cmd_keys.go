@@ -280,8 +280,15 @@ func cmdRandomKey(c *Ctx) {
 		return
 	}
 	n := c.s.ks.NumShards()
-	for attempt := 0; attempt < 4*n; attempt++ {
+	// Random sampling first; with few keys it can miss every populated
+	// shard, so fall back to an ordered pass over all shards (from a random
+	// start) so a non-empty database never yields nil.
+	start := rand.IntN(n)
+	for attempt := 0; attempt < 5*n; attempt++ {
 		i := rand.IntN(n)
+		if attempt >= 4*n {
+			i = (start + attempt) % n
+		}
 		var found string
 		var ok bool
 		c.withShard(i, false, func() {
