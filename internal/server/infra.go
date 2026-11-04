@@ -127,7 +127,7 @@ func (s *Server) waitBlocked(c *Client, w *waiter, ctx *Ctx) int {
 		// Detect client disconnects while blocked, so a disconnected client
 		// never pops data it can no longer receive.
 		defer close(peekDone)
-		if c.r.Buffered() > 0 || c.conn == nil {
+		if c.conn == nil || c.r.Buffered() > 0 { // in-process sessions have no socket or reader
 			return
 		}
 		_, err := c.r.Underlying().Peek(1)
