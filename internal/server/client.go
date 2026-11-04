@@ -170,7 +170,7 @@ func (s *Server) serveClient(c *Client) {
 }
 
 func (s *Server) closeClient(c *Client) {
-	c.conn.Close()
+	_ = c.conn.Close() // best-effort: cleanup after failure or teardown
 	s.pubsub.unsubscribeAll(c)
 	s.watches.unwatchAll(c)
 	s.removeMonitor(c)
@@ -211,7 +211,7 @@ func (c *Client) startPush() {
 			_, err := c.w.Out.Write(msg)
 			c.wmu.Unlock()
 			if err != nil {
-				c.conn.Close()
+				_ = c.conn.Close() // best-effort: cleanup after failure or teardown
 				for range ch {
 				}
 				return
@@ -235,7 +235,7 @@ func (c *Client) push(msg []byte) {
 		close(c.pushCh)
 		c.s.stats.evictedClients.Add(1)
 		c.s.log.Warn("client closed for overcoming of output buffer limits", "id", c.id, "addr", c.addr)
-		c.conn.Close()
+		_ = c.conn.Close() // best-effort: cleanup after failure or teardown
 	}
 }
 

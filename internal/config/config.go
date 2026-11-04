@@ -595,7 +595,7 @@ func (c *Config) LoadFile(path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // best-effort: read-only or teardown
 	c.ConfigFile = path
 	sc := bufio.NewScanner(f)
 	ln := 0

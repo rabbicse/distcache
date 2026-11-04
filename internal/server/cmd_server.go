@@ -438,7 +438,7 @@ func clientKill(c *Ctx) {
 		addr := c.Arg(2)
 		for _, o := range s.sortedClients() {
 			if o.addr == addr {
-				o.conn.Close()
+				_ = o.conn.Close() // best-effort: cleanup after failure or teardown
 				if o == c.cl {
 					c.cl.closeAfterReply = true
 				}
@@ -512,7 +512,7 @@ func clientKill(c *Ctx) {
 		if o == c.cl && skipme {
 			continue
 		}
-		o.conn.Close()
+		_ = o.conn.Close() // best-effort: cleanup after failure or teardown
 		if o == c.cl {
 			c.cl.closeAfterReply = true
 		}

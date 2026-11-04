@@ -180,7 +180,7 @@ func (s *Server) Start() error {
 		ln, err := lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			for _, l := range lns {
-				l.Close()
+				_ = l.Close() // best-effort: cleanup after failure or teardown
 			}
 			return err
 		}
@@ -251,7 +251,7 @@ func (s *Server) acceptLoop(ln net.Listener) error {
 		if n >= s.cfg.MaxClients.Load() {
 			s.stats.rejected.Add(1)
 			_, _ = conn.Write([]byte("-ERR max number of clients reached\r\n"))
-			conn.Close()
+			_ = conn.Close() // best-effort: cleanup after failure or teardown
 			continue
 		}
 		if tc, ok := conn.(*net.TCPConn); ok {
@@ -274,7 +274,7 @@ func (s *Server) Shutdown(save bool) error {
 		s.closing.Store(true)
 		s.lnMu.Lock()
 		for _, ln := range s.listeners {
-			ln.Close()
+			_ = ln.Close() // best-effort: cleanup after failure or teardown
 		}
 		s.lnMu.Unlock()
 		s.repl.stop()
@@ -288,7 +288,7 @@ func (s *Server) Shutdown(save bool) error {
 		close(s.done)
 		s.clientsMu.RLock()
 		for _, c := range s.clients {
-			c.conn.Close()
+			_ = c.conn.Close() // best-effort: teardown
 		}
 		s.clientsMu.RUnlock()
 		if s.cfg.UnixSocket != "" {
@@ -380,7 +380,7 @@ func (s *Server) checkClientTimeouts(now time.Time) {
 			continue
 		}
 		if now.Unix()-c.lastInteraction.Load() > to {
-			c.conn.Close()
+			_ = c.conn.Close() // best-effort: teardown
 		}
 	}
 }

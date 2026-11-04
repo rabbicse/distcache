@@ -45,7 +45,7 @@ func MustDial(t testing.TB, addr string) *Client {
 	if err != nil {
 		t.Fatalf("dial %s: %v", addr, err)
 	}
-	t.Cleanup(func() { c.Close() })
+	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
 
@@ -171,7 +171,7 @@ func StartRedis(t testing.TB) (addr string, ok bool) {
 		return "", false
 	}
 	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	_ = l.Close() // best-effort: cleanup after failure or teardown
 	dir := t.TempDir()
 	cmd := exec.Command(bin, "--port", strconv.Itoa(port), "--bind", "127.0.0.1", "--save", "",
 		"--appendonly", "no", "--dir", dir, "--daemonize", "no", "--logfile", filepath.Join(dir, "redis.log"))
@@ -186,10 +186,10 @@ func StartRedis(t testing.TB) (addr string, ok bool) {
 	for i := 0; i < 100; i++ {
 		if c, err := Dial(addr); err == nil {
 			if v, err := c.Do("PING"); err == nil && string(v.Str) == "PONG" {
-				c.Close()
+				_ = c.Close() // best-effort: cleanup after failure or teardown
 				return addr, true
 			}
-			c.Close()
+			_ = c.Close() // best-effort: cleanup after failure or teardown
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

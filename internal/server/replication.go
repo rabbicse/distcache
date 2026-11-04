@@ -112,7 +112,7 @@ func (r *replicaConn) enqueue(b []byte) {
 func (r *replicaConn) close() {
 	r.closeOnce.Do(func() {
 		close(r.closed)
-		r.c.conn.Close()
+		_ = r.c.conn.Close() // best-effort: cleanup after failure or teardown
 	})
 }
 
@@ -202,7 +202,7 @@ func (r *replication) stop() {
 		r.stopCh = nil
 	}
 	if r.masterConn != nil {
-		r.masterConn.Close()
+		_ = r.masterConn.Close() // best-effort: cleanup after failure or teardown
 	}
 	r.mu.Unlock()
 	p := r.s.prop
@@ -466,7 +466,7 @@ func (r *replication) promote() {
 		r.stopCh = nil
 	}
 	if r.masterConn != nil {
-		r.masterConn.Close()
+		_ = r.masterConn.Close() // best-effort: cleanup after failure or teardown
 	}
 	r.replID2 = r.replID
 	r.secondOff = r.s.prop.offsetValue() + 1
@@ -489,7 +489,7 @@ func (r *replication) startReplica(host, port string) {
 		close(r.stopCh)
 	}
 	if r.masterConn != nil {
-		r.masterConn.Close()
+		_ = r.masterConn.Close() // best-effort: cleanup after failure or teardown
 	}
 	stop := make(chan struct{})
 	r.stopCh = stop
@@ -554,10 +554,10 @@ func (r *replication) syncWithMaster(host, port string, stop chan struct{}) erro
 	r.mu.Lock()
 	r.masterConn = conn
 	r.mu.Unlock()
-	defer conn.Close()
+	defer func() { _ = conn.Close() }() // best-effort: read-only or teardown
 	go func() {
 		<-stop
-		conn.Close()
+		_ = conn.Close() // best-effort: cleanup after failure or teardown
 	}()
 	r.linkState.Store("handshake")
 	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
