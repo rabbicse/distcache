@@ -28,10 +28,12 @@ func collectSnapshot(ks *Keyspace) map[string]string {
 	return got
 }
 
-func TestSnapshot_IsPointInTime(t *testing.T) {
-	ks := newKS(t)
+// snapshotFixture seeds 200 old keys and begins a snapshot.
+func snapshotFixture(t *testing.T) (ks *Keyspace, orig map[string]string, ops []func()) {
+	t.Helper()
+	ks = newKS(t)
 	const nOld = 200
-	orig := map[string]string{}
+	orig = map[string]string{}
 	w := writeDB(ks, baseMs)
 	ks.LockAll(true)
 	for i := range nOld {
@@ -56,67 +58,50 @@ func TestSnapshot_IsPointInTime(t *testing.T) {
 		t.Fatalf("cut saw %d keys, want %d", cutKeys, nOld)
 	}
 
-	// mutate runs the writer protocol used by the server: lock, Preserve, mutate.
-	mutate := func(key string, fn func(db *DB)) {
-		withLock(ks, []string{key}, func() {
-			db := writeDB(ks, baseMs)
-			db.Preserve(key)
-			fn(db)
-		})
+	// mutate follows the server's writer protocol: lock, Preserve, mutate.
+	mutate := func(key string, fn func(db *DB)) func() {
+		return func() {
+			withLock(ks, []string{key}, func() {
+				db := writeDB(ks, baseMs)
+				db.Preserve(key)
+				fn(db)
+			})
+		}
 	}
-
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	// Writers: 100 new keys, 10 overwrites, 10 deletes, 5 flush-like re-adds.
+	// Interleave 100 inserts, 10 overwrites and 10 deletes.
 	for i := range 100 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			k := fmt.Sprintf("new%d", i)
-			mutate(k, func(db *DB) { db.Add(k, []byte("fresh")) })
-		}()
+		k := fmt.Sprintf("new%d", i)
+		ops = append(ops, mutate(k, func(db *DB) { db.Add(k, []byte("fresh")) }))
+		if i < 10 {
+			ko := fmt.Sprintf("old%d", i)
+			kd := fmt.Sprintf("old%d", 10+i)
+			ops = append(ops,
+				mutate(ko, func(db *DB) { db.Add(ko, []byte("overwritten")) }),
+				mutate(kd, func(db *DB) { db.Delete(kd) }))
+		}
 	}
-	for i := range 10 {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			<-start
-			k := fmt.Sprintf("old%d", i)
-			mutate(k, func(db *DB) { db.Add(k, []byte("overwritten")) })
-		}()
-		go func() {
-			defer wg.Done()
-			<-start
-			k := fmt.Sprintf("old%d", 10+i)
-			mutate(k, func(db *DB) { db.Delete(k) })
-		}()
-	}
-	// Reader runs concurrently with the writers.
-	var snap map[string]string
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-start
-		snap = collectSnapshot(ks)
-	}()
-	close(start)
-	wg.Wait()
-	ks.EndSnapshot()
+	return ks, orig, ops
+}
 
-	if ks.SnapshotActive() {
-		t.Fatal("SnapshotActive: got true after End")
-	}
+func assertFrozenView(t *testing.T, snap, orig map[string]string) {
+	t.Helper()
 	if len(snap) != len(orig) {
-		t.Fatalf("snapshot has %d keys, want %d", len(snap), len(orig))
+		t.Errorf("snapshot has %d keys, want %d", len(snap), len(orig))
 	}
 	for k, want := range orig {
 		if got, ok := snap[k]; !ok || got != want {
 			t.Errorf("snapshot[%s]: got %q (present=%v), want %q", k, got, ok, want)
 		}
 	}
+	for k := range snap {
+		if _, ok := orig[k]; !ok {
+			t.Errorf("snapshot contains post-cut key %s", k)
+		}
+	}
+}
 
-	// Live data has the new writes.
+func assertLiveAfterWrites(t *testing.T, ks *Keyspace) {
+	t.Helper()
 	live := writeDB(ks, baseMs)
 	ks.LockAll(false)
 	defer ks.UnlockAll(false)
@@ -131,9 +116,55 @@ func TestSnapshot_IsPointInTime(t *testing.T) {
 	if live.Peek("old15") != nil {
 		t.Error("live old15 should be deleted")
 	}
-	if got, want := ks.DBSize(0), int64(nOld+100-10); got != want {
+	if got, want := ks.DBSize(0), int64(200+100-10); got != want {
 		t.Errorf("DBSize: got %d, want %d", got, want)
 	}
+}
+
+// TestSnapshot_IsPointInTime_WritesBeforeRead completes every write before
+// the snapshot is read, so the result depends only on Preserve being correct.
+func TestSnapshot_IsPointInTime_WritesBeforeRead(t *testing.T) {
+	ks, orig, ops := snapshotFixture(t)
+	for _, op := range ops {
+		op()
+	}
+	snap := collectSnapshot(ks)
+	ks.EndSnapshot()
+	if ks.SnapshotActive() {
+		t.Fatal("SnapshotActive: got true after End")
+	}
+	assertFrozenView(t, snap, orig)
+	assertLiveAfterWrites(t, ks)
+}
+
+// TestSnapshot_IsPointInTime_ConcurrentWrites starts the reader only after the
+// first half of the writes finished, while the second half races with it.
+func TestSnapshot_IsPointInTime_ConcurrentWrites(t *testing.T) {
+	ks, orig, ops := snapshotFixture(t)
+	half := len(ops) / 2
+	var firstDone, rest sync.WaitGroup
+	release := make(chan struct{})
+	for i, op := range ops {
+		if i < half {
+			firstDone.Add(1)
+			go func() { defer firstDone.Done(); op() }()
+			continue
+		}
+		rest.Add(1)
+		go func() { defer rest.Done(); <-release; op() }()
+	}
+	firstDone.Wait() // first N writes complete before the reader starts
+	var snap map[string]string
+	rest.Add(1)
+	go func() {
+		defer rest.Done()
+		snap = collectSnapshot(ks)
+	}()
+	close(release) // remaining writers run through the read
+	rest.Wait()
+	ks.EndSnapshot()
+	assertFrozenView(t, snap, orig)
+	assertLiveAfterWrites(t, ks)
 }
 
 func TestSnapshot_FlushAndExpirePreserved(t *testing.T) {
@@ -201,5 +232,14 @@ func TestSnapshot_PreserveWithoutSnapshotIsNoop(t *testing.T) {
 	withLock(ks, []string{"k"}, func() {
 		db.Add("k", []byte("v"))
 		db.Preserve("k")
+		e := db.Peek("k")
+		if e == nil || string(e.Value.([]byte)) != "v" {
+			t.Fatalf("entry changed by Preserve: %v", e)
+		}
 	})
+	for i, sh := range ks.shards {
+		if len(sh.overlay) != 0 || sh.pending {
+			t.Errorf("shard %d: overlay=%v pending=%v, want empty/false", i, sh.overlay, sh.pending)
+		}
+	}
 }
