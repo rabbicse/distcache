@@ -240,3 +240,19 @@ Guides live in `docs/guides/NN-<topic>.md`, one per subsystem (RESP, dispatch an
 - Windows: deferred and optional (superseded the earlier x/sys decision); Linux/macOS throughput is the priority. Server stays zero-dependency.
 - Redis 8 bundled capabilities (vector sets, JSON, Query Engine, time series, probabilistic): deferred until after sub-project 3; each gets its own spec.
 - Execution: subagent-driven, task by task with per-task review.
+
+## 11. Durability (decision 2026-11-04: support all three levels)
+
+Existing: AOF with background writer (`appendfsync always|everysec|no`), copy-on-write BGSAVE, auto-load on startup (AOF preferred, else snapshot), truncated-tail repair. Gaps: AOF off by default; `everysec` can lose ~1 s on power loss; `always` costs one fsync per write; no auto AOF rewrite; no multi-part AOF; no crash tests.
+
+Three levels, all supported, selected per server and overridable per write:
+
+| Level | Guarantee | Mechanism | Config |
+|---|---|---|---|
+| (a) **durable** | an acknowledged write survives power loss / kernel crash | **group commit**: writes append to the AOF buffer; a single committer goroutine `write`+`fsync`s every ≤ `appendfsync-group-interval` (default 1 ms) or when the batch reaches `appendfsync-group-bytes` (default 1 MiB); each client's reply is held until the fsync covering its offset completes. One fsync amortises thousands of writes | `appendfsync group` (new) |
+| (b) **process-crash safe** | survives `kill -9`/panic; ≤ 1 s loss on power loss | current `everysec` background flush | `appendfsync everysec` (default when `appendonly yes`) |
+| (c) **per-write choice** | default fast, durable on request | `WAITAOF numlocal 1 timeout` (Redis-compatible) blocks only that client until its offset is fsynced; implemented on the same committer so it costs no extra fsync | existing `WAITAOF`, made group-commit aware |
+
+Rules: reply holding in (a) happens in the connection's reply path, never under shard locks (locks are released before waiting), so durable mode does not reduce parallelism, only adds ~1 fsync interval of latency. Pipelined clients get all replies of a batch released together. `appendonly` default stays `no` for Redis compatibility; the README and `distcache.conf` example recommend `appendonly yes` + `appendfsync group` for durability. Hardening (sub-project 4) adds auto AOF rewrite (`auto-aof-rewrite-percentage/min-size`) and multi-part AOF (base + incremental files + manifest) so compaction never rewrites the whole history inline.
+
+Placement: group commit and WAITAOF integration ship in sub-project 2 (they live in the reply/propagation hot path); auto-rewrite and multi-part AOF in sub-project 4; **crash-recovery tests ship now in sub-project 1** (Task 14): a subprocess server is `SIGKILL`ed mid-write-load and restarted, asserting (b) no acknowledged write older than 1 s is lost, and — once (a) exists — zero acknowledged writes lost.

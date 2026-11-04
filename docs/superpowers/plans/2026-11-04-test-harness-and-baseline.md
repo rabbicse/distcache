@@ -289,6 +289,7 @@
   - `TestPartialResyncAfterReplicaRestart`: stop replica, write 100 keys on master, start replica again → `INFO stats` on master `sync_partial_ok:1`.
   - `TestChainedReplica`: A→B→C; write on A visible on C.
   - `TestGoRedisCompat`: pipeline of 1000 SET/GET, `TxPipeline`, `Watch` optimistic lock retry, `Subscribe` + `Publish`, `Eval`, `HSET/HGETALL` map decoding, RESP3 (`Protocol: 3`) `HGETALL` and `ZRANGE WITHSCORES` typed results, `Scan` iterator.
+  - `TestCrashRecoveryEverysec`: build `bin/distcache-server`, run it as a **subprocess** with `--appendonly yes --appendfsync everysec --dir <tmp>`; 8 clients `INCR`/`SET k:<i> <i>` in a loop, recording each acknowledged write with its ack time; after 3 s send `SIGKILL`; restart on the same dir; assert every write acknowledged more than 1.5 s before the kill is present (spec section 11, level b) and the server starts cleanly (truncated tail repaired). Same test with `appendfsync always`: assert **every** acknowledged write is present. Skip on Windows.
   - `TestPanicDoesNotKillServer`: `DEBUG PANIC` → error reply; new connection `PING` works.
 - [ ] **Step 2: Run** `make test-e2e` — Expected: PASS (go-redis is downloaded on first run; CI has network).
 - [ ] **Step 3: Verify root module unchanged**: `cd $(git rev-parse --show-toplevel) && go mod tidy && git diff --exit-code go.mod` — Expected: no diff.
