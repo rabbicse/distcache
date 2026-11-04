@@ -9,7 +9,6 @@ import (
 // lockCheckWriter fails the test when Write is called without the guarding
 // mutex held, which is how an interleaving socket write would look.
 type lockCheckWriter struct {
-	t        *testing.T
 	mu       *sync.Mutex
 	unlocked atomic.Int64
 }
@@ -24,7 +23,7 @@ func (r *lockCheckWriter) Write(p []byte) (int, error) {
 
 func TestWriter_Flush_HoldsMutex(t *testing.T) {
 	var mu sync.Mutex
-	out := &lockCheckWriter{t: t, mu: &mu}
+	out := &lockCheckWriter{mu: &mu}
 	w := NewWriter(out, 2)
 	w.Mu = &mu
 

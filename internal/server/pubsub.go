@@ -194,33 +194,22 @@ func (c *Ctx) subscribe(kind subKind) {
 		return
 	}
 	cl.startPush()
-	direct := c.W == cl.w
-	if direct {
-		// Hold wmu across registration and the acks so no push can slip in
-		// before them. Flush (explicit or from a large reply) would take
-		// wmu through W.Mu and deadlock, so detach Mu while we hold it. Only
-		// this goroutine touches W.Mu; the push goroutine writes Out directly.
-		cl.wmu.Lock()
-		mu := c.W.Mu
-		c.W.Mu = nil
-		defer func() {
-			c.W.Mu = mu
-			cl.wmu.Unlock()
-		}()
-	}
 	subName, _ := kind.names()
 	h := c.s.pubsub
 	m := cl.subMap(kind)
 	if *m == nil {
 		*m = map[string]struct{}{}
 	}
+	// Ordering guarantee: for a direct (non-queued) subscribe, the acks are
+	// written and flushed to the socket before the client is added to the
+	// hub, so no push for these channels can be produced ahead of its ack.
+	// The flush takes the write mutex itself; wmu is never held across it.
+	var added []string
 	for _, a := range c.Args[1:] {
 		name := string(a)
 		if _, ok := (*m)[name]; !ok {
 			(*m)[name] = struct{}{}
-			h.mu.Lock()
-			hubAdd(h.hubMap(kind), name, cl)
-			h.mu.Unlock()
+			added = append(added, name)
 		}
 		cl.updateSubCounts()
 		c.W.WritePushLen(3)
@@ -232,9 +221,14 @@ func (c *Ctx) subscribe(kind subKind) {
 			c.W.WriteInt(int64(cl.nsubs.Load() + cl.npsubs.Load()))
 		}
 	}
-	if direct {
+	if c.W == cl.w {
 		_ = c.W.Flush()
 	}
+	h.mu.Lock()
+	for _, name := range added {
+		hubAdd(h.hubMap(kind), name, cl)
+	}
+	h.mu.Unlock()
 }
 
 func (c *Ctx) unsubscribe(kind subKind) {

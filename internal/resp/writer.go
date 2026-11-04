@@ -73,8 +73,9 @@ func (w *Writer) Flushes() uint64 { return w.nflush.Load() }
 // Err returns the first write error.
 func (w *Writer) Err() error { return w.err }
 
-// Flush writes buffered bytes to Out, holding Mu (if set) for the write. The
-// caller must not already hold Mu.
+// Flush writes buffered bytes to Out, holding Mu (if set) for the write only;
+// buffer handling stays on the owning goroutine. The caller must not already
+// hold Mu, and nothing in this package takes Mu anywhere else.
 func (w *Writer) Flush() error {
 	if w.Mu != nil {
 		w.Mu.Lock()
