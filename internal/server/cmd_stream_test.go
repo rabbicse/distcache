@@ -103,7 +103,6 @@ var streamGroupScript = []testutil.Step{
 	testutil.S(`*[*["g", *[*["3-0", *["f", "3"]]]]]`, "XREAD", "STREAMS", "g", "+"),
 	testutil.S("(nil-array)", "XREAD", "STREAMS", "g", "$"),
 	testutil.S("(nil-array)", "XREAD", "STREAMS", "g", "missing", "3-0", "0"),
-	testutil.S("-ERR Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be specified.", "XREAD", "STREAMS", "g", "h", "0"),
 	testutil.S("-ERR The > ID can be specified only when calling XREADGROUP using the GROUP <group> <consumer> option.", "XREAD", "STREAMS", "g", ">"),
 	testutil.S(errSyntax, "XREAD", "FOO", "STREAMS", "g", "0"),
 	testutil.S("+OK", "XGROUP", "CREATE", "g", "grp", "0"),

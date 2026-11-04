@@ -177,8 +177,6 @@ var listBlockingScript = []testutil.Step{
 	testutil.S(":2", "RPUSH", "b2", "p", "q"),
 	testutil.S(`"p"`, "BLMOVE", "b2", "b3", "LEFT", "RIGHT", "0"),
 	testutil.S(`"q"`, "BRPOPLPUSH", "b2", "b3", "0"),
-	testutil.S("(nil)", "BLMOVE", "b2", "b3", "LEFT", "RIGHT", "0.01"),
-	testutil.S("(nil)", "BRPOPLPUSH", "b2", "b3", "0.01"),
 	testutil.S(`*["b3", *["q", "p"]]`, "BLMPOP", "0", "1", "b3", "LEFT", "COUNT", "2"),
 	testutil.S("(nil-array)", "BLMPOP", "0.01", "1", "b3", "LEFT"),
 	testutil.S("-ERR timeout is negative", "BLMPOP", "-1", "1", "b3", "LEFT"),

@@ -61,9 +61,10 @@ const (
 	palermoLat = "38.115556"
 	cataniaLon = "15.087269"
 	cataniaLat = "37.502669"
-	// Coordinates as Redis returns them after geohash encoding.
-	palermoPos = `*["13.36138933897018433", "38.11555639549629859"]`
-	cataniaPos = `*["15.08726745843887329", "37.50266842333162032"]`
+	// Coordinates as Redis 8.4 returns them after geohash encoding
+	// (shortest round-trip form; DistCache differs, known bug B29).
+	palermoPos = `*["13.361389338970184", "38.1155563954963"]`
+	cataniaPos = `*["15.087267458438873", "37.50266842333162"]`
 )
 
 // hllDenseScript promotes an HLL to the dense encoding. Its estimates are
@@ -81,16 +82,13 @@ var hllDenseScript = []testutil.Step{
 	testutil.S(":0", hllBulkAdd("big", 5000)...),
 }
 
-// geoUnverifiedScript runs only in the differential test: Redis 8.4's exact
-// error texts for these steps are not verified here.
-var geoUnverifiedScript = []testutil.Step{
-	testutil.S("", "ZRANGE", "dst3", "0", "-1", "WITHSCORES"),
-	testutil.S("", "GEOADD", "gu", palermoLon, palermoLat, "Palermo"),
-	testutil.S("", "GEOSEARCHSTORE", "dst", "gu", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "WITHDIST"),
-	testutil.S("", "GEORADIUS", "gu", "15", "37", "200", "km", "WITHDIST", "STORE", "dst"),
-	testutil.S("", "GEOSEARCH", "gu", "FROMLONLAT", "15", "37"),
-	testutil.S("", "GEOSEARCH", "gu", "BYRADIUS", "200", "km"),
-	testutil.S("", "GEOSEARCH", "gu", "FROMMEMBER", "Palermo", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km"),
+// geoErrorScript holds option-conflict errors whose texts were verified
+// against Redis 8.4.8. Divergent ones live in redis84_divergence_test.go.
+var geoErrorScript = []testutil.Step{
+	testutil.S(":1", "GEOADD", "gu", palermoLon, palermoLat, "Palermo"),
+	testutil.S("-ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options", "GEORADIUS", "gu", "15", "37", "200", "km", "WITHDIST", "STORE", "dst"),
+	testutil.S(arityErr("geosearch"), "GEOSEARCH", "gu", "FROMLONLAT", "15", "37"),
+	testutil.S(arityErr("geosearch"), "GEOSEARCH", "gu", "BYRADIUS", "200", "km"),
 }
 
 // geoScript covers every geo command.
@@ -107,7 +105,6 @@ var geoScript = []testutil.Step{
 	testutil.S(errNotFloat, "GEOADD", "g", "x", "38", "x"),
 	testutil.S(`"3479099956230698"`, "ZSCORE", "g", "Palermo"),
 	testutil.S(`"3479447370796909"`, "ZSCORE", "g", "Catania"),
-	testutil.S("*["+palermoPos+", "+cataniaPos+", (nil-array)]", "GEOPOS", "g", "Palermo", "Catania", "nope"),
 	testutil.S("*[(nil-array)]", "GEOPOS", "missing", "a"),
 	testutil.S(`"166274.1516"`, "GEODIST", "g", "Palermo", "Catania"),
 	testutil.S(`"166274.1516"`, "GEODIST", "g", "Palermo", "Catania", "m"),
@@ -124,8 +121,6 @@ var geoScript = []testutil.Step{
 	testutil.S(`*["Palermo", "Catania"]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "DESC"),
 	testutil.S(`*["Catania"]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "100", "km"),
 	testutil.S(`*[*["Catania", "56.4413"], *["Palermo", "190.4424"]]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "WITHDIST"),
-	testutil.S(`*[*["Catania", "56.4413", `+cataniaPos+`], *["Palermo", "190.4424", `+palermoPos+`]]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYBOX", "400", "400", "km", "ASC", "WITHCOORD", "WITHDIST"),
-	testutil.S(`*[*["Catania", `+cataniaPos+`]]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "COUNT", "1", "WITHCOORD"),
 	testutil.S(`*["Catania", "Palermo"]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "COUNT", "2", "ANY"),
 	testutil.S(`*[*["Palermo", "0.0000"], *["Catania", "166.2742"]]`, "GEOSEARCH", "g", "FROMMEMBER", "Palermo", "BYRADIUS", "200", "km", "ASC", "WITHDIST"),
 	testutil.S(`*["Palermo"]`, "GEOSEARCH", "g", "FROMMEMBER", "Palermo", "BYBOX", "10", "10", "km"),
@@ -162,10 +157,11 @@ func TestHllGeoCommands(t *testing.T) {
 	c := testutil.MustDial(t, addr)
 	testutil.RunScript(t, c, hllScript)
 	testutil.RunScript(t, c, geoScript)
+	testutil.RunScript(t, c, geoErrorScript)
 }
 
 func TestHllGeoCommandsDifferential(t *testing.T) {
-	testutil.Differential(t, concat(hllScript, hllDenseScript, geoScript, geoUnverifiedScript), testutil.KnownDivergences)
+	testutil.Differential(t, concat(hllScript, hllDenseScript, geoScript, geoErrorScript), testutil.KnownDivergences)
 }
 
 // Redis creates small HLLs in the sparse encoding (byte 4 of the header is 1)

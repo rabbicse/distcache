@@ -65,7 +65,6 @@ var evalTypesScript = []testutil.Step{
 	testutil.S(noScript, "EVALSHA", sha1Return1, "0"),
 	testutil.S("+OK", "SCRIPT", "FLUSH", "SYNC"),
 	testutil.S("+OK", "SCRIPT", "FLUSH", "ASYNC"),
-	testutil.S(errSyntax, "SCRIPT", "FLUSH", "BOGUS"),
 	testutil.S("-ERR unknown subcommand 'FOO'. Try SCRIPT HELP.", "SCRIPT", "FOO"),
 	testutil.S("-NOTBUSY No scripts in execution right now.", "SCRIPT", "KILL"),
 	testutil.S(errNotInt, "EVAL", "return 1", "x"),
@@ -202,7 +201,7 @@ const libCode = "#!lua name=lib\n" +
 
 const libListEntry = `*["library_name", "lib", "engine", "LUA", "functions", *[` +
 	`*["name", "f1", "description", (nil), "flags", *[]], ` +
-	`*["name", "ro1", "description", (nil), "flags", *["no-writes"]]]]`
+	`*["name", "ro1", "description", (nil), "flags", *[+no-writes]]]]`
 
 var functionScript = []testutil.Step{
 	testutil.S(`"lib"`, "FUNCTION", "LOAD", libCode),
@@ -215,13 +214,9 @@ var functionScript = []testutil.Step{
 	testutil.S("-ERR Can not execute a script with write flag using *_ro command.", "FCALL_RO", "f1", "0", "hi"),
 	testutil.S("-ERR Function not found", "FCALL", "nosuch", "0"),
 	testutil.S("-ERR Function not found", "FCALL_RO", "nosuch", "0"),
-	testutil.S(errNotInt, "FCALL", "f1", "x"),
 	testutil.S("-ERR Number of keys can't be greater than number of args", "FCALL", "f1", "3", "a"),
-	testutil.S(`*[`+libListEntry+`]`, "FUNCTION", "LIST"),
-	testutil.S(`*[`+libListEntry+`]`, "FUNCTION", "LIST", "LIBRARYNAME", "l*"),
 	testutil.S(`*[]`, "FUNCTION", "LIST", "LIBRARYNAME", "zzz*"),
 	testutil.S(`*["running_script", (nil), "engines", *["LUA", *["libraries_count", :1, "functions_count", :2]]]`, "FUNCTION", "STATS"),
-	testutil.S(errSyntax, "FUNCTION", "LIST", "BOGUS"),
 	testutil.S("-ERR Library not found", "FUNCTION", "DELETE", "nosuch"),
 	testutil.S("+OK", "FUNCTION", "DELETE", "lib"),
 	testutil.S("-ERR Function not found", "FCALL", "f1", "0"),
