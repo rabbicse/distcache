@@ -35,7 +35,7 @@ func TestReadCommand_Inline(t *testing.T) {
 	}
 }
 
-func TestReadCommand_EmptyAndErrors(t *testing.T) {
+func TestReadCommand_EmptyRequestsAndProtocolErrors(t *testing.T) {
 	tests := []struct {
 		name    string
 		in      string
@@ -74,6 +74,7 @@ func TestReadCommand_EmptyAndErrors(t *testing.T) {
 					t.Fatalf("got err %v, want %v", err, tc.wantEOF)
 				}
 			default:
+				// Empty requests yield an empty (non-nil) slice, not nil.
 				if err != nil || len(args) != 0 {
 					t.Fatalf("got %q, %v, want no args, nil", args, err)
 				}
