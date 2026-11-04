@@ -238,14 +238,22 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 			s.ks.Lock(idx, write)
 			hasLocks = true
 		}
+		// waiter is registered on the first block and kept across retries so
+		// the client keeps its FIFO position on the keys.
+		var waiter *waiter
 		for {
 			ctx.DB.Now = s.Now().UnixMilli()
 			s.runHandler(ctx)
 			if !ctx.blocked {
 				break
 			}
-			// Register while still holding the locks so no wake-up is lost.
-			waiter := s.blocker.register(c, ctx.DB.Idx, ctx.blockKeys)
+			if waiter == nil {
+				// Register while still holding the locks so no wake-up is lost.
+				waiter = s.blocker.register(c, ctx.DB.Idx, ctx.blockKeys)
+			} else {
+				// Woken but still blocked: let the next waiter try.
+				s.blocker.passOn(waiter)
+			}
 			s.flushUnit(ctx)
 			if hasLocks {
 				if lockAll {
@@ -255,7 +263,6 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 				}
 			}
 			outcome := s.waitBlocked(c, waiter, ctx)
-			s.blocker.unregister(waiter)
 			if outcome != blockWoken {
 				if outcome == blockUnblockErr {
 					w.WriteError("UNBLOCKED client unblocked via CLIENT UNBLOCK")
@@ -286,6 +293,9 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 		}
 		if barrier {
 			s.ks.ReleaseSnapshots()
+		}
+		if waiter != nil {
+			s.blocker.unregister(waiter)
 		}
 	}
 	dur := time.Since(start)

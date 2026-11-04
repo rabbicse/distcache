@@ -1,6 +1,8 @@
 package server
 
 import (
+	"cmp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,64 +19,102 @@ type bkey struct {
 	key string
 }
 
+// waiter is one blocked command invocation. It stays registered (keeping
+// its place in every key's queue) across retries until the command finishes.
 type waiter struct {
 	c    *Client
+	seq  uint64 // registration order; immutable after register
 	keys []bkey
-	ch   chan struct{}
+	ch   chan struct{} // wake-up token, capacity 1
 }
 
+// wake delivers a wake-up token unless one is already pending.
+func (w *waiter) wake() {
+	select {
+	case w.ch <- struct{}{}:
+	default:
+	}
+}
+
+// blocker tracks clients blocked on keys and wakes them in FIFO order, like
+// Redis's handleClientsBlockedOnKeys: a write wakes only the oldest waiter
+// on each key, and every waiter that finishes or re-blocks passes the turn
+// to the next one in the queue (see passOn), so waiters are served one at a
+// time in the order they blocked and no wake-up is lost.
 type blocker struct {
 	mu      sync.Mutex
-	waiters map[bkey]map[*waiter]struct{}
-	count   atomic.Int64
+	seq     uint64             // guarded by mu
+	waiters map[bkey][]*waiter // guarded by mu; each queue sorted by seq
+	count   atomic.Int64       // registered waiters, read lock-free
 }
 
-func newBlocker() *blocker { return &blocker{waiters: map[bkey]map[*waiter]struct{}{}} }
+func newBlocker() *blocker { return &blocker{waiters: map[bkey][]*waiter{}} }
 
+// register queues a new waiter on keys. Callers hold the keys' shard locks
+// so no write can slip in between the failed attempt and registration.
 func (b *blocker) register(c *Client, db int, keys []string) *waiter {
 	w := &waiter{c: c, ch: make(chan struct{}, 1)}
 	b.mu.Lock()
+	b.seq++
+	w.seq = b.seq
 	for _, k := range keys {
 		bk := bkey{db, k}
 		w.keys = append(w.keys, bk)
-		set := b.waiters[bk]
-		if set == nil {
-			set = map[*waiter]struct{}{}
-			b.waiters[bk] = set
-		}
-		set[w] = struct{}{}
+		b.waiters[bk] = append(b.waiters[bk], w)
 	}
 	b.mu.Unlock()
 	b.count.Add(1)
 	return w
 }
 
+// unregister removes w from its queues and passes the turn on, since w may
+// have consumed (or been about to consume) a wake-up meant for its key.
 func (b *blocker) unregister(w *waiter) {
 	b.mu.Lock()
 	for _, bk := range w.keys {
-		if set := b.waiters[bk]; set != nil {
-			delete(set, w)
-			if len(set) == 0 {
-				delete(b.waiters, bk)
-			}
+		q := slices.DeleteFunc(b.waiters[bk], func(o *waiter) bool { return o == w })
+		if len(q) == 0 {
+			delete(b.waiters, bk)
+		} else {
+			b.waiters[bk] = q
 		}
 	}
+	b.passOnLocked(w)
 	b.mu.Unlock()
 	b.count.Add(-1)
 }
 
-// signal wakes clients blocked on keys (called after writes, under locks).
+// passOn wakes, on each of w's keys, the first waiter queued after w. A
+// waiter calls it when it re-blocks after a wake-up, so data it could not
+// use still reaches the waiters behind it.
+func (b *blocker) passOn(w *waiter) {
+	b.mu.Lock()
+	b.passOnLocked(w)
+	b.mu.Unlock()
+}
+
+func (b *blocker) passOnLocked(w *waiter) {
+	for _, bk := range w.keys {
+		q := b.waiters[bk]
+		i, _ := slices.BinarySearchFunc(q, w.seq+1, func(o *waiter, seq uint64) int {
+			return cmp.Compare(o.seq, seq)
+		})
+		if i < len(q) {
+			q[i].wake()
+		}
+	}
+}
+
+// signal wakes the oldest client blocked on each of keys (called after
+// writes, under locks).
 func (b *blocker) signal(db int, keys []string) {
 	if b.count.Load() == 0 {
 		return
 	}
 	b.mu.Lock()
 	for _, k := range keys {
-		for w := range b.waiters[bkey{db, k}] {
-			select {
-			case w.ch <- struct{}{}:
-			default:
-			}
+		if q := b.waiters[bkey{db, k}]; len(q) > 0 {
+			q[0].wake()
 		}
 	}
 	b.mu.Unlock()
@@ -86,12 +126,9 @@ func (b *blocker) signalAll() {
 		return
 	}
 	b.mu.Lock()
-	for _, set := range b.waiters {
-		for w := range set {
-			select {
-			case w.ch <- struct{}{}:
-			default:
-			}
+	for _, q := range b.waiters {
+		for _, w := range q {
+			w.wake()
 		}
 	}
 	b.mu.Unlock()

@@ -250,7 +250,6 @@ func TestZSetCommands_RandMemberWithScoresCount(t *testing.T) {
 }
 
 func TestZSetCommands_BlockingFIFO(t *testing.T) {
-	t.Skip("known bug B13: clients blocked on one key are woken all at once and race, so wake order is not FIFO (infra.go blocker.waiters is a map; blocker.signal wakes every waiter)")
 	tests := []blockingFIFOCase{
 		{
 			name:  "BZPOPMIN",
