@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -10,6 +11,9 @@ import (
 	"github.com/rabbicse/distcache/internal/resp"
 	"github.com/rabbicse/distcache/internal/storage"
 )
+
+// errInternal is the reply sent when a command handler panics.
+const errInternal = "ERR internal error"
 
 func (s *Server) lookupCommand(name []byte) *Command {
 	var buf [32]byte
@@ -325,7 +329,10 @@ func (s *Server) runHandler(ctx *Ctx) {
 			ctx.DB.Preserve(k)
 		}
 	}
-	cmd.Handler(ctx)
+	if !s.invokeHandler(ctx) {
+		s.afterPanic(ctx)
+		return
+	}
 	if ctx.blocked {
 		return
 	}
@@ -360,6 +367,44 @@ func (s *Server) runHandler(ctx *Ctx) {
 	if write {
 		s.stats.totalWritesProc.Add(1)
 	}
+}
+
+// invokeHandler runs the command handler and reports whether it returned
+// normally. A panic is logged with its stack, counted, and answered with
+// errInternal instead of crashing the process. Recovery happens here, below
+// call, so call's lock release, blocking loop and snapshot barrier run
+// exactly as for a normal return; EXEC and scripts (locked=true) likewise
+// keep ownership of their locks.
+func (s *Server) invokeHandler(ctx *Ctx) (ok bool) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		ok = false
+		s.log.Error("handler panic", "cmd", ctx.Cmd.Name, "err", r, "stack", string(debug.Stack()))
+		s.stats.unexpectedErrors.Add(1)
+		ctx.errored = true
+		ctx.blocked = false
+		ctx.W.WriteError(errInternal)
+	}()
+	ctx.Cmd.Handler(ctx)
+	return true
+}
+
+// afterPanic does the minimal post-processing for a handler that panicked.
+// The write may be half applied, so it is deliberately NOT propagated to
+// AOF/replicas (and no keyspace events fire): replaying a partial effect, or
+// a command that fails deterministically, would poison the log and could
+// crash every replica. Watchers are still invalidated if anything changed,
+// since the keys may have been modified in memory.
+func (s *Server) afterPanic(ctx *Ctx) {
+	ctx.prop = nil
+	ctx.propSet = false
+	if ctx.dirty > 0 && len(ctx.keys) > 0 {
+		s.watches.touch(ctx.DB.Idx, ctx.keys)
+	}
+	ctx.dirty = 0
 }
 
 func (u *execUnit) add(db int, args [][]byte) {

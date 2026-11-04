@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -130,8 +131,17 @@ func (c *Client) flush() error {
 
 func (c *Client) inPubSub() bool { return c.subCount.Load() > 0 }
 
+// serveClient runs the read-execute-reply loop for one connection. A panic
+// outside command handlers (parsing, reply writing, replication hand-over) is
+// logged and closes only this client, never the process.
 func (s *Server) serveClient(c *Client) {
 	defer s.closeClient(c)
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("client loop panic", "client", c.id, "err", r, "stack", string(debug.Stack()))
+			s.stats.unexpectedErrors.Add(1)
+		}
+	}()
 	for {
 		if to := s.cfg.Timeout.Load(); to > 0 && !c.inPubSub() && !c.isMaster && !c.isReplica {
 			_ = c.conn.SetReadDeadline(time.Now().Add(time.Duration(to) * time.Second))
