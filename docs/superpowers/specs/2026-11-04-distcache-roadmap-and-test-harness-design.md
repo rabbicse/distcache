@@ -14,7 +14,7 @@ DistCache is a Redis-compatible server in Go. The project serves four purposes a
 
 **Compatibility target: Redis 8.4** (raised from 7.4 on 2026-11-04). The core command set and reply formats tracked are those of Redis Open Source 8.4. Redis 8 bundles former modules (JSON, Query Engine, time series, probabilistic types) and adds vector sets; these are listed as gaps (section 2.1) and scheduled individually rather than assumed. The exact 8.0→8.4 command delta must be verified against the 8.4 release notes and `COMMAND DOCS` of a real `redis-server` 8.4 at the start of each sub-project, since this spec was written from source reading, not the release notes.
 
-**Platforms: Linux, macOS and Windows Server** (Windows Server 2019+ / Windows 10+, amd64 and arm64). All three are first-class: CI runs the full unit/integration/e2e suite on each. See section 4.5 for the Windows-specific work.
+**Platforms: Linux and macOS are first-class** — all throughput work is designed, tuned and benchmarked for them (Linux is the production reference). **Windows Server is deferred and optional** (decision 2026-11-04): CI only checks that the module compiles and vets for `GOOS=windows`; section 4.5 records the known Windows work for a later sub-project.
 
 Explicitly out of scope: client-side caching (CLIENT TRACKING) — treated as a separate problem; a custom binary protocol — rejected because it would require bespoke SDKs in four languages and the measured bottleneck is not RESP parsing.
 
@@ -172,7 +172,7 @@ A Go load generator with the redis-benchmark option subset `-h -p -c -n -P -d -t
 
 Accurate description of what exists: features table, quick start, configuration (redis.conf style), compatibility statement with the divergence allowlist, how to run tests and benchmarks, project layout, roadmap pointing at this spec. Diagrams in Mermaid (open question: the user mentioned a tool "archify" for end-to-end flow diagrams; until clarified, Mermaid is used and diagrams are kept in a single place so they can be swapped).
 
-### 4.5 Windows Server support
+### 4.5 Windows Server support (deferred — not part of sub-project 1)
 
 Findings: the module builds for Windows today. Known runtime risks:
 - `os.Rename` over a file that is still open fails on Windows; AOF rewrite (`propagate.go:273`) renames onto the live AOF and snapshot save (`persistence.go:122`) onto the dump file. Fix: close (or reopen with `FILE_SHARE_DELETE`-equivalent semantics) before rename, then reopen; covered by an e2e test run on Windows.
@@ -182,11 +182,11 @@ Findings: the module builds for Windows today. Known runtime risks:
 - File paths in config (`dir`, `dbfilename`) use `filepath` everywhere; tests use `t.TempDir()`.
 - Differential tests skip on Windows (no official `redis-server` build); all other suites run.
 
-Deliverables in sub-project 1: CI job on `windows-latest`; `make`-free equivalents (`go test` commands documented, plus `scripts/test.ps1`); rename fix; `cmd/distcache-server` service mode behind `//go:build windows` with `--service install|uninstall|run`; Windows release zip in the Docker/CI pipeline.
+Deferred deliverables (future sub-project): CI test job on `windows-latest`; `make`-free equivalents (`go test` commands documented, plus `scripts/test.ps1`); rename fix; `cmd/distcache-server` service mode behind `//go:build windows` with `--service install|uninstall|run`; Windows release zip in the Docker/CI pipeline.
 
 ### 4.4 Success criteria
 
-- `make test-all` green with `-race` on Linux, macOS and Windows (Windows runs via `scripts/test.ps1`).
+- `make test-all` green with `-race` on Linux and macOS; `GOOS=windows go vet ./...` passes in CI.
 - Every registered command appears in at least one integration test (enforced by the coverage gate).
 - Differential suite passes against `redis-server` 8.4 with every divergence listed in the allowlist.
 - Line coverage ≥ 80% for `internal/resp`, `internal/storage`, `internal/ds`, `internal/config`; ≥ 60% for `internal/server`.
@@ -233,11 +233,10 @@ Guides live in `docs/guides/NN-<topic>.md`, one per subsystem (RESP, dispatch an
 
 - "archify" for end-to-end flow diagrams: unknown tool; Mermaid assumed until clarified.
 - Java client choice (Jedis vs Lettuce) — decide in sub-project 5.
-- Windows service: accept `golang.org/x/sys` as the server's single dependency (default), or stay zero-dep and document WinSW/NSSM.
 - Which Redis 8 bundled capabilities (vector sets, JSON, Query Engine, time series, probabilistic) are in scope, and in which sub-project.
 
 ## 10. Decisions (2026-11-04)
 
-- Windows service: add `golang.org/x/sys` (Windows-only build tag) as the server's single dependency.
+- Windows: deferred and optional (superseded the earlier x/sys decision); Linux/macOS throughput is the priority. Server stays zero-dependency.
 - Redis 8 bundled capabilities (vector sets, JSON, Query Engine, time series, probabilistic): deferred until after sub-project 3; each gets its own spec.
 - Execution: subagent-driven, task by task with per-task review.

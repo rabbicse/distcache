@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Server module (`github.com/rabbicse/distcache`) keeps **zero** `require` lines in `go.mod`.
-- Go `1.27` (`toolchain go1.27.3`, already set in go.mod); all tests pass with `-race` on Linux, macOS and Windows Server.
+- Go `1.27` (`toolchain go1.27.3`, already set in go.mod); all tests pass with `-race` on Linux and macOS; Windows is compile/vet-only in CI (deferred).
 - Redis compatibility target is `8.4`; differential tests skip (not fail) when `redis-server` is absent or `DISTCACHE_SKIP_REDIS` is set.
 - No performance changes in this sub-project beyond the two bug fixes (spec 4.1).
 - Coverage floors: ≥ 80 % lines for `internal/resp`, `internal/storage`, `internal/ds`, `internal/config`; ≥ 60 % for `internal/server`.
@@ -333,27 +333,9 @@
 **Files:**
 - Modify: `README.md` (full rewrite), `CLAUDE.md` (drop the "README is aspirational" note; add `make` targets and `test/e2e` module note)
 
-- [ ] **Step 1: Write README.md** with sections, in this order: one-paragraph description (Redis 8.4-compatible, Go, stdlib-only, Linux/macOS/Windows Server, multi-core execution); **Status** table (implemented / partial / planned, from spec 2.1 — cluster, ACL, TLS as planned); **Quick start** (`go run ./cmd/distcache-server`, `redis-cli`, Docker, Windows: zip release + `--service install`); **Configuration** (redis.conf style, CLI flags, link to `CONFIG GET *`); **Architecture** with one Mermaid diagram of the request path (client → RESP → dispatch → shard locks → handler → propagation) and one of persistence/replication; **Compatibility** (RESP2/RESP3, link to `testutil.KnownDivergences` as the intentional-divergence list, DCSNAP ≠ RDB); **Performance** (how to run `make bench`, link to latest `bench/results/*.md`, a short honest note that pipelining/concurrency is required for high throughput); **Testing** (`make test`, `make test-e2e`, differential tests need `redis-server`, `DISTCACHE_SKIP_REDIS`); **Project layout**; **Roadmap** (six sub-projects, link to the spec); **Credits** — a short list that includes Redis (https://github.com/redis/redis) as the reference implementation and the video https://www.youtube.com/watch?v=sRXIRikME14&t=178s (one neutral line: "inspiration and background"); **License**. Keep the whole file under 250 lines; no claims the code does not support.
+- [ ] **Step 1: Write README.md** with sections, in this order: one-paragraph description (Redis 8.4-compatible, Go, stdlib-only, Linux/macOS/Windows Server, multi-core execution); **Status** table (implemented / partial / planned, from spec 2.1 — cluster, ACL, TLS as planned); **Quick start** (`go run ./cmd/distcache-server`, `redis-cli`, Docker); **Configuration** (redis.conf style, CLI flags, link to `CONFIG GET *`); **Architecture** with one Mermaid diagram of the request path (client → RESP → dispatch → shard locks → handler → propagation) and one of persistence/replication; **Compatibility** (RESP2/RESP3, link to `testutil.KnownDivergences` as the intentional-divergence list, DCSNAP ≠ RDB); **Performance** (how to run `make bench`, link to latest `bench/results/*.md`, a short honest note that pipelining/concurrency is required for high throughput); **Testing** (`make test`, `make test-e2e`, differential tests need `redis-server`, `DISTCACHE_SKIP_REDIS`); **Project layout**; **Roadmap** (six sub-projects, link to the spec); **Credits** — a short list that includes Redis (https://github.com/redis/redis) as the reference implementation and the video https://www.youtube.com/watch?v=sRXIRikME14&t=178s (one neutral line: "inspiration and background"); **License**. Keep the whole file under 250 lines; no claims the code does not support.
 - [ ] **Step 2: Verify** every command in README runs: execute the quick start and `make` commands listed. Expected: all succeed.
 - [ ] **Step 3: Commit** — `git commit -am "docs: rewrite README to match the implementation"`
-
----
-
-### Task 17a: Windows Server support
-
-**Files:**
-- Create: `scripts/test.ps1`, `cmd/distcache-server/service_windows.go`, `cmd/distcache-server/service_other.go`, `test/e2e/windows_test.go`
-- Modify: `internal/server/propagate.go:235-280` (AOF rewrite rename), `internal/server/persistence.go:100-125` (snapshot rename), `cmd/distcache-server/main.go` (shutdown on `os.Interrupt` on all OSes; `--service` flag), `go.mod` (add `golang.org/x/sys`, confirmed in spec section 10), `.github/workflows/ci.yml` (Windows job runs `scripts/test.ps1`; differential tests skip there)
-
-**Interfaces:**
-- Produces: `func runService(name string, run func(stop <-chan struct{}) error) error` (windows: `svc.Run`; other OSes: returns an error "service mode is only supported on Windows"); CLI `distcache-server --service install|uninstall|run [--service-name DistCache] [config args...]`.
-
-- [ ] **Step 1: Write failing test** `TestAOFRewriteAndSaveOnWindows` in `test/e2e/windows_test.go` (no build tag — it must pass everywhere): `appendonly yes`, write 1000 keys, `BGREWRITEAOF`, poll until done, `SAVE`, write more, restart server on same dir → all keys present. On Windows today this fails with "Access is denied" from `os.Rename`.
-- [ ] **Step 2: Run** on Windows CI (or a local Windows VM) — Expected: FAIL.
-- [ ] **Step 3: Implement**: before renaming over the live AOF, sync and close `aofFile` under `propagator.mu`, rename, reopen in append mode, and resume; snapshot save writes `tmp`, closes it, then renames (already closed — verify), and on Windows retries `os.Rename` up to 5× with 20 ms backoff for transient sharing violations from antivirus scanners. Shutdown: `signal.Notify(sig, os.Interrupt, syscall.SIGTERM)` (SIGTERM is a no-op on Windows; harmless). Service files per Interfaces.
-- [ ] **Step 4: Write `scripts/test.ps1`**: runs `go vet ./...`, `go test -race -count=1 ./...`, `Push-Location test/e2e; go test -race -count=1 ./...; Pop-Location`, exits non-zero on failure.
-- [ ] **Step 5: Run** `make test-all` locally and the Windows CI job — Expected: PASS on all three OSes.
-- [ ] **Step 6: Commit** — `git commit -am "feat: Windows Server support (safe rename, interrupt shutdown, service mode, CI)"`
 
 ---
 
