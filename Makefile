@@ -6,7 +6,7 @@ help:
 
 build:
 	go build -o bin/distcache-server ./cmd/distcache-server
-# The bench binary is added in Task 15.
+	go build -o bin/distcache-bench ./cmd/distcache-bench
 
 test:
 	go test -race -count=1 ./...
@@ -25,7 +25,7 @@ cover:
 	go tool cover -html=coverage.out -o coverage.html
 
 bench:
-	@echo "added in Task 15"
+	./bench/run.sh
 
 microbench:
 	@echo "added in Task 16"
