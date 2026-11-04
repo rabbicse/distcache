@@ -18,14 +18,10 @@ import (
 	"github.com/rabbicse/distcache/internal/testutil"
 )
 
-// coverageExempt lists commands covered directly by e2e tests / Task 13.
-var coverageExempt = []string{"sync", "psync", "replconf", "monitor", "shutdown", "debug", "module"}
-
 // TestZZCoverageGate fails listing every registered command that no script
 // exercised. It only makes sense for a whole-package run, so it is skipped
 // when -run is given.
 func TestZZCoverageGate(t *testing.T) {
-	t.Skip("enabled in Task 13")
 	if f := flag.Lookup("test.run"); f != nil && f.Value.String() != "" {
 		t.Skip("coverage gate runs only for a whole-package run (no -run filter)")
 	}
@@ -33,7 +29,7 @@ func TestZZCoverageGate(t *testing.T) {
 	covered := testutil.CoveredCommands()
 	var missing []string
 	for _, n := range s.CommandNames() {
-		if !slices.Contains(covered, n) && !slices.Contains(coverageExempt, n) {
+		if !slices.Contains(covered, n) {
 			missing = append(missing, n)
 		}
 	}
