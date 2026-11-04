@@ -67,6 +67,27 @@ func (c *Client) Read() (resp.Value, error) {
 	return c.r.ReadValue()
 }
 
+// ReadSnapshot reads a full-sync snapshot transfer: "$<len>\r\n" followed
+// by exactly len payload bytes. Unlike a RESP bulk string the payload has no
+// trailing CRLF, so Read cannot be used for it. A non-'$' line (such as an
+// error) is returned as an error. Blank keepalive lines, which Redis sends
+// while it prepares the snapshot, are skipped.
+func (c *Client) ReadSnapshot() ([]byte, error) {
+	_ = c.Conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	line := ""
+	for line == "" {
+		var err error
+		if line, err = c.r.ReadLine(); err != nil {
+			return nil, err
+		}
+	}
+	n, err := strconv.ParseInt(strings.TrimPrefix(line, "$"), 10, 64)
+	if !strings.HasPrefix(line, "$") || err != nil || n < 0 {
+		return nil, fmt.Errorf("snapshot header: got %q, want $<len>", line)
+	}
+	return c.r.ReadRaw(n)
+}
+
 // Do sends a command and reads its reply.
 func (c *Client) Do(args ...string) (resp.Value, error) {
 	if err := c.Send(args...); err != nil {

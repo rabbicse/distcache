@@ -272,7 +272,8 @@ func cmdSync(c *Ctx) {
 		return
 	}
 	replid, off := "?", int64(-1)
-	if strings.EqualFold(c.Cmd.Name, "psync") {
+	psync := strings.EqualFold(c.Cmd.Name, "psync")
+	if psync {
 		replid = c.Arg(1)
 		n, ok := parseInt(c.Args[2])
 		if !ok {
@@ -288,10 +289,14 @@ func cmdSync(c *Ctx) {
 	rc.state.Store("wait_bgsave")
 	cl.replica = rc
 	cl.isReplica = true
-	c.s.repl.attachReplica(rc, replid, off)
+	c.s.repl.attachReplica(rc, replid, off, psync)
 }
 
-func (r *replication) attachReplica(rc *replicaConn, replid string, off int64) {
+// attachReplica serves a PSYNC (psync true) or legacy SYNC request on rc:
+// a partial resync from the backlog when possible, otherwise a full resync.
+// Like Redis, only PSYNC clients get the +FULLRESYNC line before the
+// snapshot.
+func (r *replication) attachReplica(rc *replicaConn, replid string, off int64, psync bool) {
 	s := r.s
 	p := s.prop
 	go rc.sender()
@@ -345,7 +350,10 @@ func (r *replication) attachReplica(rc *replicaConn, replid string, off int64) {
 		return
 	}
 	rc.state.Store("send_bulk")
-	header := fmt.Sprintf("+FULLRESYNC %s %d\r\n$%d\r\n", id, startOff, buf.Len())
+	header := fmt.Sprintf("$%d\r\n", buf.Len())
+	if psync {
+		header = fmt.Sprintf("+FULLRESYNC %s %d\r\n", id, startOff) + header
+	}
 	rc.c.wmu.Lock()
 	_, err = rc.c.conn.Write([]byte(header))
 	if err == nil {

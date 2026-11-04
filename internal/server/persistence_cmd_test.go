@@ -174,10 +174,10 @@ func TestReplicationHandshake_PsyncFullResync(t *testing.T) {
 	if v.Type != '+' || len(fields) != 3 || fields[0] != "FULLRESYNC" || len(fields[1]) != 40 {
 		t.Fatalf("PSYNC ? -1: got %s, want +FULLRESYNC <40-char replid> <offset>", testutil.Render(v, false))
 	}
-	// The snapshot payload follows as a bulk string.
-	payload, err := r.Read()
-	if err != nil || payload.Type != '$' || len(payload.Str) == 0 {
-		t.Fatalf("snapshot payload: got %q, %v, want a non-empty bulk string", payload.Str, err)
+	// The snapshot payload follows as "$<len>\r\n<payload>" with no CRLF.
+	payload, err := r.ReadSnapshot()
+	if err != nil || len(payload) == 0 {
+		t.Fatalf("snapshot payload: got %q, %v, want a non-empty snapshot", payload, err)
 	}
 }
 
@@ -185,23 +185,25 @@ func TestReplicationHandshake_Sync(t *testing.T) {
 	_, addr := testutil.StartServer(t, nil)
 	r := testutil.MustDial(t, addr)
 	testutil.RecordCommands(t)("sync")
-	v, err := r.Do("SYNC")
-	if err != nil {
+	if err := r.Send("SYNC"); err != nil {
 		t.Fatal(err)
 	}
-	if v.Type == '-' {
-		t.Fatalf("SYNC: got %s, want a snapshot or FULLRESYNC reply", testutil.Render(v, false))
+	if _, err := r.ReadSnapshot(); err != nil {
+		t.Fatalf("SYNC: got %v, want a snapshot", err)
 	}
 }
 
 // Redis sends +FULLRESYNC only to PSYNC clients; a legacy SYNC client gets the
-// snapshot bulk string directly.
+// snapshot transfer directly.
 func TestReplicationHandshake_SyncNoFullResyncLine(t *testing.T) {
-	t.Skip("known bug B22: SYNC replies +FULLRESYNC <id> <offset> before the snapshot, which Redis sends only for PSYNC")
 	_, addr := testutil.StartServer(t, nil)
-	v, err := testutil.MustDial(t, addr).Do("SYNC")
-	if err != nil || v.Type != '$' || len(v.Str) == 0 {
-		t.Fatalf("SYNC: got %s, %v, want a non-empty bulk snapshot", testutil.Render(v, false), err)
+	c := testutil.MustDial(t, addr)
+	if err := c.Send("SYNC"); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := c.ReadSnapshot()
+	if err != nil || len(payload) == 0 {
+		t.Fatalf("SYNC: got %q, %v, want a non-empty snapshot", payload, err)
 	}
 }
 
