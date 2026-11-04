@@ -295,7 +295,6 @@ func TestStreamCommands_XReadBlock(t *testing.T) {
 // Redis's streamParseAddOrTrimArgs rejects a second trim strategy with its
 // own message.
 func TestStreamCommands_MaxlenAndMinid(t *testing.T) {
-	t.Skip("known bug B14: XADD/XTRIM with both MAXLEN and MINID reply plain 'syntax error' (cmd_stream.go:190 parseTrim)")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S(`"1-0"`, "XADD", "t", "1-0", "f", "1"),
@@ -307,7 +306,6 @@ func TestStreamCommands_MaxlenAndMinid(t *testing.T) {
 // Redis's XREADGROUP returns pending entries with IDs strictly greater than
 // the given ID.
 func TestStreamCommands_XReadGroupHistoryExclusive(t *testing.T) {
-	t.Skip("known bug B15: XREADGROUP with an explicit ID includes the PEL entry equal to that ID (cmd_stream.go:741 PendingRange starts at st.ids[j])")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S(`"1-0"`, "XADD", "g", "1-0", "f", "1"),
@@ -321,7 +319,6 @@ func TestStreamCommands_XReadGroupHistoryExclusive(t *testing.T) {
 // Redis's xgroupCommand reports a missing group for SETID, CREATECONSUMER and
 // DELCONSUMER with its own NOGROUP text.
 func TestStreamCommands_XGroupNoGroupText(t *testing.T) {
-	t.Skip("known bug B16: XGROUP SETID/CREATECONSUMER/DELCONSUMER on a missing group use the XPENDING NOGROUP text (cmd_stream.go:906,961,976 getGroup)")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S(`"1-0"`, "XADD", "g", "1-0", "f", "1"),

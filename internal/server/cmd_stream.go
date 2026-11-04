@@ -97,9 +97,15 @@ type trimSpec struct {
 }
 
 // parseTrim parses MAXLEN|MINID [=|~] threshold [LIMIT n] at position i.
+// Repeating the same strategy replaces it, as in Redis; mixing MAXLEN and
+// MINID is rejected with Redis's error text.
 func (c *Ctx) parseTrim(i int, t *trimSpec) (int, bool) {
-	t.set = true
-	t.minid = c.Is(i, "minid")
+	minid := c.Is(i, "minid")
+	if t.set && t.minid != minid {
+		c.Err("ERR syntax error, MAXLEN and MINID options at the same time are not compatible")
+		return 0, false
+	}
+	*t = trimSpec{set: true, minid: minid}
 	i++
 	if i < len(c.Args) && (c.Arg(i) == "~" || c.Arg(i) == "=") {
 		t.approx = c.Arg(i) == "~"
@@ -187,7 +193,7 @@ func cmdXAdd(c *Ctx) {
 			nomk = true
 			i++
 			continue
-		case (c.Is(i, "maxlen") || c.Is(i, "minid")) && !trim.set:
+		case c.Is(i, "maxlen") || c.Is(i, "minid"):
 			ni, ok := c.parseTrim(i, &trim)
 			if !ok {
 				return
@@ -422,9 +428,13 @@ func cmdXTrim(c *Ctx) {
 		return
 	}
 	var t trimSpec
-	i, ok := c.parseTrim(2, &t)
-	if !ok {
-		return
+	i := 2
+	for i < len(c.Args) && (c.Is(i, "maxlen") || c.Is(i, "minid")) {
+		ni, ok := c.parseTrim(i, &t)
+		if !ok {
+			return
+		}
+		i = ni
 	}
 	if i != len(c.Args) {
 		c.SyntaxErr()
@@ -735,10 +745,15 @@ func xreadGeneric(c *Ctx, group bool) {
 			results = append(results, result{key: key, ents: ents})
 			continue
 		}
-		// History of this consumer's PEL from the given ID.
+		// History of this consumer's PEL strictly after the given ID, like
+		// Redis's xreadCommand (streamIncrID before the range).
 		var ents []ds.StreamEntry
 		var nils []bool
-		g.PendingRange(st.ids[j], ds.MaxStreamID, func(pe *ds.PendingEntry) bool {
+		from, more := st.ids[j].Incr()
+		g.PendingRange(from, ds.MaxStreamID, func(pe *ds.PendingEntry) bool {
+			if !more {
+				return false
+			}
 			if pe.Consumer != cons {
 				return true
 			}
@@ -821,6 +836,30 @@ func (c *Ctx) getGroup(key, group, cmd string) (*ds.Stream, *ds.ConsumerGroup, b
 	return s, s.Groups[group], true
 }
 
+// errXGroupNoKey is Redis's reply when an XGROUP subcommand targets a
+// missing key.
+const errXGroupNoKey = "ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically."
+
+// xgroupGroup looks up the stream and group for XGROUP SETID, CREATECONSUMER
+// and DELCONSUMER, replying with xgroupCommand's own errors (which differ
+// from the NOGROUP text other stream commands use).
+func (c *Ctx) xgroupGroup(key, group string) (*ds.Stream, *ds.ConsumerGroup, bool) {
+	s, ok := c.getStream(key)
+	if !ok {
+		return nil, nil, false
+	}
+	if s == nil {
+		c.Err(errXGroupNoKey)
+		return nil, nil, false
+	}
+	g := s.Groups[group]
+	if g == nil {
+		c.Err("NOGROUP No such consumer group '" + group + "' for key name '" + key + "'")
+		return nil, nil, false
+	}
+	return s, g, true
+}
+
 func cmdXGroup(c *Ctx) {
 	sub := strings.ToLower(c.Arg(1))
 	if sub == "help" {
@@ -886,7 +925,7 @@ func cmdXGroup(c *Ctx) {
 		}
 		if s == nil {
 			if !mk {
-				c.Err("ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.")
+				c.Err(errXGroupNoKey)
 				return
 			}
 			s = ds.NewStream()
@@ -903,7 +942,7 @@ func cmdXGroup(c *Ctx) {
 			c.WrongSubArgs()
 			return
 		}
-		s, g, ok := c.getGroup(key, group, "")
+		s, g, ok := c.xgroupGroup(key, group)
 		if !ok {
 			return
 		}
@@ -943,7 +982,7 @@ func cmdXGroup(c *Ctx) {
 			return
 		}
 		if s == nil {
-			c.Err("ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.")
+			c.Err(errXGroupNoKey)
 			return
 		}
 		if s.Groups[group] == nil {
@@ -958,7 +997,7 @@ func cmdXGroup(c *Ctx) {
 			c.WrongSubArgs()
 			return
 		}
-		_, g, ok := c.getGroup(key, group, "")
+		_, g, ok := c.xgroupGroup(key, group)
 		if !ok {
 			return
 		}
@@ -973,7 +1012,7 @@ func cmdXGroup(c *Ctx) {
 			c.WrongSubArgs()
 			return
 		}
-		_, g, ok := c.getGroup(key, group, "")
+		_, g, ok := c.xgroupGroup(key, group)
 		if !ok {
 			return
 		}
