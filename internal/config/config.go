@@ -589,14 +589,21 @@ func (c *Config) Get(pattern string) [][2]string {
 // Has reports whether a parameter exists.
 func (c *Config) Has(name string) bool { _, ok := c.params[strings.ToLower(name)]; return ok }
 
-// LoadFile parses a redis.conf style file.
+// LoadFile parses a redis.conf style file and records it as ConfigFile, the
+// target of CONFIG REWRITE. Included files are applied but never become
+// ConfigFile.
 func (c *Config) LoadFile(path string) error {
+	c.ConfigFile = path
+	return c.loadFile(path)
+}
+
+// loadFile applies the directives in path, following include directives.
+func (c *Config) loadFile(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }() // best-effort: read-only or teardown
-	c.ConfigFile = path
 	sc := bufio.NewScanner(f)
 	ln := 0
 	for sc.Scan() {
@@ -610,7 +617,7 @@ func (c *Config) LoadFile(path string) error {
 			return fmt.Errorf("%s:%d: unbalanced quotes", path, ln)
 		}
 		if strings.EqualFold(args[0], "include") && len(args) == 2 {
-			if err := c.LoadFile(args[1]); err != nil {
+			if err := c.loadFile(args[1]); err != nil {
 				return err
 			}
 			continue

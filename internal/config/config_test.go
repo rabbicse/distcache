@@ -113,7 +113,6 @@ func TestLoadFile_Include(t *testing.T) {
 }
 
 func TestLoadFile_IncludeKeepsMainConfigFile(t *testing.T) {
-	t.Skip("known bug B4: LoadFile leaves ConfigFile pointing at the last included file; CONFIG REWRITE would overwrite the include")
 	dir := t.TempDir()
 	inc := writeFile(t, dir, "inc.conf", "port 7100\n")
 	mainPath := writeFile(t, dir, "main.conf", "include "+inc+"\nhz 20\n")
