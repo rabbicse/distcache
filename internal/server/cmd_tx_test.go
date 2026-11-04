@@ -97,7 +97,7 @@ func TestTx_WatchConflict(t *testing.T) {
 		testutil.S("+OK", "MULTI"),
 		testutil.S("+QUEUED", "SET", "k", "5"),
 		testutil.S("*[+OK]", "EXEC"),
-		// Deleting a watched key aborts; so does an expiry-less rewrite.
+		// Deleting a watched key aborts the transaction.
 		testutil.S("+OK", "WATCH", "k"),
 	})
 	testutil.RunScript(t, b, []testutil.Step{testutil.S(":1", "DEL", "k")})
