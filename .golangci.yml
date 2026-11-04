@@ -1,0 +1,35 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+# golangci-lint v2 merged gosimple into staticcheck, so enabling staticcheck
+# covers the originally planned gosimple as well.
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+
+  exclusions:
+    rules:
+      # Pre-existing baseline findings. Each rule is excluded rather than fixed
+      # to avoid refactoring existing code; tighten these over time.
+      # Close() on connections/files during teardown is intentionally best-effort.
+      - linters: [errcheck]
+        text: "Error return value of `.*(Close|Remove)` is not checked"
+      # Many error strings are Redis wire replies that must match Redis exactly.
+      - linters: [staticcheck]
+        text: "ST1005"
+      # Stylistic QF (quickfix) suggestions in existing code; not worth churn.
+      - linters: [staticcheck]
+        text: "QF10"
+      # Reserved struct fields / helpers kept for upcoming Redis INFO/CONFIG parity.
+      - linters: [unused]
+        text: "(field|func) .* is unused"
+      # Existing code assigns a loop variable that is not read afterwards.
+      - linters: [ineffassign]
+        path: internal/server/cmd_hll_geo\.go

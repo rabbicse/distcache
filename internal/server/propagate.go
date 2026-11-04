@@ -357,7 +357,7 @@ func (s *Server) loadAOF(path string) error {
 	r.MaxBulkLen = 1 << 62
 	cmds := 0
 	var inMulti bool
-	var lastGood int64 = cr.n - int64(br.Buffered())
+	lastGood := cr.n - int64(br.Buffered())
 	for {
 		args, err := r.ReadCommand()
 		if err == io.EOF {

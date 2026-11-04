@@ -625,7 +625,7 @@ func (c *Config) LoadFile(path string) error {
 func (c *Config) applyDirective(args []string) error {
 	name := strings.ToLower(args[0])
 	val := strings.Join(args[1:], " ")
-	if name == "save" && c.saveSeen == false {
+	if name == "save" && !c.saveSeen {
 		c.saveSeen = true
 		c.Save = nil
 		if val == "" || val == `""` {
