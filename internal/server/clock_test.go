@@ -56,13 +56,14 @@ func TestActiveExpiryUsesInjectedClock(t *testing.T) {
 }
 
 func TestClockJumpBackwardIsSafe(t *testing.T) {
-	fc, c := startWithClock(t, nil)
+	fc, c := startWithClock(t, func(cfg *config.Config) { cfg.Hz.Store(100) })
 	start := fc.Now()
 	if got := c.DoS("SET", "k", "v", "PX", "100"); got != "+OK" {
 		t.Fatalf("SET: got %q, want +OK", got)
 	}
 	fc.Set(start.Add(-time.Hour))
-	time.Sleep(50 * time.Millisecond) // let active expiry run against the backward clock
+	// At Hz=100 the cron ticks every 10ms; 150ms guarantees it ran against the backward clock.
+	time.Sleep(150 * time.Millisecond)
 	if got := c.DoS("GET", "k"); got != `"v"` {
 		t.Fatalf("GET: got %q, want %q", got, `"v"`)
 	}
