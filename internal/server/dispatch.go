@@ -375,7 +375,13 @@ func (s *Server) runHandler(ctx *Ctx) {
 // call, so call's lock release, blocking loop and snapshot barrier run
 // exactly as for a normal return; EXEC and scripts (locked=true) likewise
 // keep ownership of their locks.
+//
+// Any partial reply the handler produced is discarded first so the pipelined
+// stream stays in sync. If part of it was already flushed to the socket it
+// cannot be retracted; then nothing more is written (an extra reply would
+// desync the client) and the connection is closed after replying.
 func (s *Server) invokeHandler(ctx *Ctx) (ok bool) {
+	mark, flushes := ctx.W.Len(), ctx.W.Flushes()
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -383,9 +389,19 @@ func (s *Server) invokeHandler(ctx *Ctx) (ok bool) {
 		}
 		ok = false
 		s.log.Error("handler panic", "cmd", ctx.Cmd.Name, "err", r, "stack", string(debug.Stack()))
+		if ctx.dirty > 0 {
+			s.log.Warn("possible AOF/replica divergence", "cmd", ctx.Cmd.Name, "keys", ctx.keys)
+		}
 		s.stats.unexpectedErrors.Add(1)
 		ctx.errored = true
 		ctx.blocked = false
+		if ctx.W.Flushes() != flushes {
+			if ctx.cl != nil {
+				ctx.cl.closeAfterReply = true
+			}
+			return
+		}
+		ctx.W.Truncate(mark)
 		ctx.W.WriteError(errInternal)
 	}()
 	ctx.Cmd.Handler(ctx)

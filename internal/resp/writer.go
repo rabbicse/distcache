@@ -19,10 +19,11 @@ var (
 // Proto selects the protocol version (2 or 3). RESP3-only types are mapped to
 // their RESP2 equivalents exactly as Redis does.
 type Writer struct {
-	Out   io.Writer
-	Proto int
-	buf   []byte
-	err   error
+	Out    io.Writer
+	Proto  int
+	buf    []byte
+	err    error
+	nflush uint64
 }
 
 const flushThreshold = 64 * 1024
@@ -41,6 +42,20 @@ func (w *Writer) Reset() { w.buf = w.buf[:0] }
 // Len returns the number of buffered bytes.
 func (w *Writer) Len() int { return len(w.buf) }
 
+// Truncate shrinks the buffered data to its first n bytes, discarding a
+// partially written reply. It is a no-op when n is negative or not smaller
+// than Len; bytes already flushed to Out cannot be taken back.
+func (w *Writer) Truncate(n int) {
+	if n >= 0 && n < len(w.buf) {
+		w.buf = w.buf[:n]
+	}
+}
+
+// Flushes returns how many times buffered data was actually written to Out.
+// Callers compare it before and after an operation to learn whether bytes of
+// a partial reply have already left the buffer (and so cannot be Truncated).
+func (w *Writer) Flushes() uint64 { return w.nflush }
+
 // Err returns the first write error.
 func (w *Writer) Err() error { return w.err }
 
@@ -50,6 +65,7 @@ func (w *Writer) Flush() error {
 		return w.err
 	}
 	if w.err == nil {
+		w.nflush++
 		_, w.err = w.Out.Write(w.buf)
 	}
 	if cap(w.buf) > 1<<20 {

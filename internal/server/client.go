@@ -133,7 +133,10 @@ func (c *Client) inPubSub() bool { return c.subCount.Load() > 0 }
 
 // serveClient runs the read-execute-reply loop for one connection. A panic
 // outside command handlers (parsing, reply writing, replication hand-over) is
-// logged and closes only this client, never the process.
+// logged and closes only this client, never the process. Limit: such a panic
+// is not expected while shard locks are held (call releases them on the
+// normal path, and handler panics are recovered below it); if one did occur
+// the locks would stay held, so this guard is a last resort, not a proof.
 func (s *Server) serveClient(c *Client) {
 	defer s.closeClient(c)
 	defer func() {
