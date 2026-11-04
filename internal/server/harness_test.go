@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -80,6 +81,7 @@ func TestDistCache_GetNoArgsErrorText(t *testing.T) {
 func TestDifferentialDetectsBothErrors(t *testing.T) {
 	steps := []testutil.Step{testutil.S("", "GET")}
 	const redisErr = "-ERR wrong number of arguments for 'get' command"
+	get := []testutil.Divergence{{Cmd: "get", Reason: "test"}}
 	tests := []struct {
 		name     string
 		a, b     string
@@ -88,7 +90,11 @@ func TestDifferentialDetectsBothErrors(t *testing.T) {
 	}{
 		{"identical errors pass", redisErr, redisErr, nil, false},
 		{"different errors fail", "-ERR something else", redisErr, nil, true},
-		{"allowlisted differing passes", "-ERR x", "-ERR y", []testutil.Divergence{{Cmd: "get", Reason: "test"}}, false},
+		{"allowlisted non-error differing passes", `"a"`, `"b"`, get, false},
+		{"allowlisted one side error fails", `"a"`, "-ERR y", get, true},
+		{"allowlisted different errors fail", "-ERR x", "-ERR y", get, true},
+		{"allowlisted identical errors pass", "-ERR x", "-ERR x", get, false},
+		{"transport error fails", "IOERR eof", `"a"`, nil, true},
 		{"different values fail", `"a"`, `"b"`, nil, true},
 	}
 	for _, tc := range tests {
@@ -133,6 +139,13 @@ func TestKnownDivergences_WellFormed(t *testing.T) {
 // TestDifferential_AgainstRealRedis skips when no Redis is available. It must
 // not call t.Parallel: REDIS_SERVER_ADDR points at a shared server.
 func TestDifferential_AgainstRealRedis(t *testing.T) {
+	// Holds with or without Redis: steps always run on DistCache, so the
+	// commands are recorded even when the test then skips.
+	t.Cleanup(func() {
+		if !slices.Contains(testutil.CoveredCommands(), "lrange") {
+			t.Errorf("CoveredCommands() = %v, want it to contain \"lrange\"", testutil.CoveredCommands())
+		}
+	})
 	testutil.Differential(t, []testutil.Step{
 		testutil.S("", "SET", "k", "v"),
 		testutil.S("", "GET", "k"),

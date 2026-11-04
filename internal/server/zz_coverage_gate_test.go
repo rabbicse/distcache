@@ -4,6 +4,11 @@ package server_test
 // order (and tests in source order within a file), so TestZZCoverageGate runs
 // after every other test in the package has recorded its commands through
 // testutil.RunScript/Differential. Do not rely on the test name for ordering.
+//
+// IMPORTANT: no test in package server_test may call t.Parallel. Parallel
+// tests are paused until the serial tests finish, so they would run after the
+// gate and their commands would be reported as uncovered. (Differential tests
+// also share one external Redis.)
 
 import (
 	"flag"

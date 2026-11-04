@@ -51,46 +51,31 @@ func CoveredCommands() []string {
 	return out
 }
 
-// execSteps runs steps on c and returns the rendered replies, recording each
-// command as covered. A transport error is rendered as "IOERR ...".
-func execSteps(t testing.TB, c *Client, steps []Step) []string {
+// execStep runs one step on c, records its command as covered and returns the
+// rendered reply. A transport error is rendered as "IOERR ...".
+func execStep(t testing.TB, c *Client, i int, st Step) string {
 	t.Helper()
-	record := RecordCommands(t)
-	got := make([]string, len(steps))
-	for i, st := range steps {
-		if len(st.Cmd) == 0 {
-			t.Fatalf("step %d: empty command", i)
-		}
-		record(st.Cmd[0])
-		v, err := c.Do(st.Cmd...)
-		if err != nil {
-			got[i] = "IOERR " + err.Error()
-			continue
-		}
-		got[i] = Render(v, st.Sorted)
+	if len(st.Cmd) == 0 {
+		t.Fatalf("step %d: empty command", i)
 	}
-	return got
+	RecordCommands(t)(st.Cmd[0])
+	v, err := c.Do(st.Cmd...)
+	if err != nil {
+		return ioErrPrefix + err.Error()
+	}
+	return Render(v, st.Sorted)
 }
+
+// ioErrPrefix marks a rendered transport failure (not a Redis error reply).
+const ioErrPrefix = "IOERR "
 
 // RunScript executes steps in order on c and fails t at the first step whose
 // rendered reply differs from Want, with "step %d %v: got %s want %s".
 // Steps after the mismatch are not run.
 func RunScript(t testing.TB, c *Client, steps []Step) {
 	t.Helper()
-	record := RecordCommands(t)
 	for i, st := range steps {
-		if len(st.Cmd) == 0 {
-			t.Fatalf("step %d: empty command", i)
-		}
-		record(st.Cmd[0])
-		v, err := c.Do(st.Cmd...)
-		got := "IOERR "
-		if err != nil {
-			got += err.Error()
-		} else {
-			got = Render(v, st.Sorted)
-		}
-		if got != st.Want {
+		if got := execStep(t, c, i, st); got != st.Want {
 			t.Fatalf("step %d %v: got %s want %s", i, st.Cmd, got, st.Want)
 		}
 	}

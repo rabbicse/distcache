@@ -7,7 +7,7 @@ import (
 
 // Divergence allowlists a command whose replies legitimately differ from
 // Redis. Steps for that command still execute on both servers (so state stays
-// in sync) but their replies are not compared.
+// in sync) but non-error replies are not compared; error replies always are.
 type Divergence struct {
 	// Cmd is the lowercase top-level command name.
 	Cmd string
@@ -41,27 +41,48 @@ var KnownDivergences = []Divergence{
 }
 
 // Differential runs steps (Want is ignored) against a fresh in-process
-// DistCache and a real Redis, and fails if any non-allowlisted step renders
-// differently. Two error replies are only equal if their full text matches.
-// It skips t when no Redis is available (see StartRedis). Because it may use
-// a shared external Redis, callers must not run it in parallel.
+// DistCache and a real Redis, interleaved step by step so time-dependent
+// replies (TTLs) do not drift, and fails if any step renders differently.
+//
+// Comparison rules: an allowlisted command (see Divergence) is exempt only
+// when both replies are non-errors; if either reply is an error (starts with
+// "-"), the full text must match even for allowlisted commands. Two different
+// error strings therefore fail. A transport error on either side is fatal.
+//
+// If no Redis is available (see StartRedis) every step still runs on
+// DistCache, which records command coverage and catches panics or hangs, but
+// replies are not asserted and t is then skipped. Because it may use a shared
+// external Redis, callers must not run it in parallel.
 func Differential(t testing.TB, steps []Step, allow []Divergence) {
 	t.Helper()
 	redisAddr, ok := StartRedis(t)
-	if !ok {
-		t.Skip("redis-server not available (install it or set REDIS_SERVER_ADDR)")
-	}
 	_, addr := StartServer(t, nil)
 	dc := MustDial(t, addr)
+	if !ok {
+		for i, st := range steps {
+			if got := execStep(t, dc, i, st); strings.HasPrefix(got, ioErrPrefix) {
+				t.Fatalf("step %d %v: distcache transport error: %s", i, st.Cmd, got)
+			}
+		}
+		t.Skip("redis-server not available (install it or set REDIS_SERVER_ADDR); ran steps on DistCache only")
+	}
 	rc := MustDial(t, redisAddr)
-	gotDC := execSteps(t, dc, steps)
-	gotRedis := execSteps(t, rc, steps)
+	gotDC := make([]string, len(steps))
+	gotRedis := make([]string, len(steps))
+	for i, st := range steps {
+		gotDC[i] = execStep(t, dc, i, st)
+		gotRedis[i] = execStep(t, rc, i, st)
+		if strings.HasPrefix(gotDC[i], ioErrPrefix) || strings.HasPrefix(gotRedis[i], ioErrPrefix) {
+			t.Fatalf("step %d %v: transport error: distcache %s, redis %s", i, st.Cmd, gotDC[i], gotRedis[i])
+		}
+	}
 	CompareReplies(t, steps, gotDC, gotRedis, allow)
 }
 
-// CompareReplies is the pure comparison used by Differential: gotA is DistCache's
-// replies, gotB Redis's. It fails t at the first non-allowlisted step where
-// they differ, including when both are errors with different text.
+// CompareReplies is the pure, Redis-free comparison used by Differential:
+// gotA is DistCache's rendered replies, gotB Redis's. It fails t at the first
+// differing step. Allowlisted commands are exempt only when neither reply is
+// an error; transport errors (IOERR) are fatal.
 func CompareReplies(t testing.TB, steps []Step, gotA, gotB []string, allow []Divergence) {
 	t.Helper()
 	if len(gotA) != len(steps) || len(gotB) != len(steps) {
@@ -72,11 +93,19 @@ func CompareReplies(t testing.TB, steps []Step, gotA, gotB []string, allow []Div
 		allowed[strings.ToLower(d.Cmd)] = true
 	}
 	for i, st := range steps {
-		if len(st.Cmd) == 0 || allowed[strings.ToLower(st.Cmd[0])] {
+		if len(st.Cmd) == 0 {
 			continue
 		}
-		if gotA[i] != gotB[i] {
-			t.Fatalf("step %d %v: distcache %s, redis %s", i, st.Cmd, gotA[i], gotB[i])
+		a, b := gotA[i], gotB[i]
+		if strings.HasPrefix(a, ioErrPrefix) || strings.HasPrefix(b, ioErrPrefix) {
+			t.Fatalf("step %d %v: transport error: distcache %s, redis %s", i, st.Cmd, a, b)
+		}
+		isErr := strings.HasPrefix(a, "-") || strings.HasPrefix(b, "-")
+		if allowed[strings.ToLower(st.Cmd[0])] && !isErr {
+			continue
+		}
+		if a != b {
+			t.Fatalf("step %d %v: distcache %s, redis %s", i, st.Cmd, a, b)
 		}
 	}
 }
