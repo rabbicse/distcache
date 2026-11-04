@@ -110,10 +110,19 @@ func TestLoadFile_Include(t *testing.T) {
 	if c.RequirePass() != "se cret" || !c.RequirePassSet.Load() {
 		t.Errorf("requirepass got %q", c.RequirePass())
 	}
-	if c.ConfigFile != inc {
-		// LoadFile records the most recently opened file; Rewrite callers
-		// load the main file last via ParseArgs.
-		t.Logf("ConfigFile is %q", c.ConfigFile)
+}
+
+func TestLoadFile_IncludeKeepsMainConfigFile(t *testing.T) {
+	t.Skip("known bug B4: LoadFile leaves ConfigFile pointing at the last included file; CONFIG REWRITE would overwrite the include")
+	dir := t.TempDir()
+	inc := writeFile(t, dir, "inc.conf", "port 7100\n")
+	mainPath := writeFile(t, dir, "main.conf", "include "+inc+"\nhz 20\n")
+	c := Default()
+	if err := c.LoadFile(mainPath); err != nil {
+		t.Fatal(err)
+	}
+	if c.ConfigFile != mainPath {
+		t.Errorf("ConfigFile got %q, want %q", c.ConfigFile, mainPath)
 	}
 }
 

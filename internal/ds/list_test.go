@@ -48,25 +48,12 @@ func TestList_PushPop_BothEnds(t *testing.T) {
 	}
 }
 
-func TestList_Index_NegativeNormalised(t *testing.T) {
-	// Index takes a normalised non-negative index; callers translate -1 etc.
+func TestList_Index_InRange(t *testing.T) {
 	l := listOf("a", "b", "c", "d")
-	norm := func(i int) int {
-		if i < 0 {
-			return l.Len() + i
+	for i, want := range []string{"a", "b", "c", "d"} {
+		if got := string(l.Index(i)); got != want {
+			t.Errorf("Index(%d) got %q, want %q", i, got, want)
 		}
-		return i
-	}
-	tests := []struct {
-		idx  int
-		want string
-	}{{0, "a"}, {-1, "d"}, {-4, "a"}, {2, "c"}}
-	for _, tc := range tests {
-		t.Run(fmt.Sprint(tc.idx), func(t *testing.T) {
-			if got := string(l.Index(norm(tc.idx))); got != tc.want {
-				t.Errorf("got %q, want %q", got, tc.want)
-			}
-		})
 	}
 }
 
@@ -140,54 +127,27 @@ func TestList_Trim(t *testing.T) {
 	}
 }
 
-// removeCount emulates LREM count semantics on top of Filter.
-func removeCount(l *List, elem string, count int) int {
-	limit := count
-	if limit < 0 {
-		limit = -limit
+func TestList_Filter_PredicateAndCount(t *testing.T) {
+	l := listOf("a", "b", "a", "c", "a")
+	var seenIdx []int
+	removed := l.Filter(func(i int, v []byte) bool {
+		seenIdx = append(seenIdx, i)
+		return string(v) != "a"
+	})
+	if removed != 3 {
+		t.Errorf("removed got %d, want 3", removed)
 	}
-	// Negative count removes from the tail: find the indexes first.
-	var idxs []int
-	for i := 0; i < l.Len(); i++ {
-		if string(l.Index(i)) == elem {
-			idxs = append(idxs, i)
-		}
+	if got := listStrings(l); !slices.Equal(got, []string{"b", "c"}) {
+		t.Errorf("got %v, want [b c]", got)
 	}
-	if count < 0 {
-		slices.Reverse(idxs)
+	if !slices.Equal(seenIdx, []int{0, 1, 2, 3, 4}) {
+		t.Errorf("predicate indexes got %v, want 0..4 in order", seenIdx)
 	}
-	if count != 0 && len(idxs) > limit {
-		idxs = idxs[:limit]
+	if n := l.Filter(func(int, []byte) bool { return true }); n != 0 || l.Len() != 2 {
+		t.Errorf("keep-all removed %d, len %d", n, l.Len())
 	}
-	drop := map[int]bool{}
-	for _, i := range idxs {
-		drop[i] = true
-	}
-	return l.Filter(func(i int, _ []byte) bool { return !drop[i] })
-}
-
-func TestList_Filter_RemCountSemantics(t *testing.T) {
-	tests := []struct {
-		name  string
-		in    []string
-		count int
-		want  []string
-		n     int
-	}{
-		{"all", []string{"a", "b", "a", "c", "a"}, 0, []string{"b", "c"}, 3},
-		{"head two", []string{"a", "b", "a", "a", "c"}, 2, []string{"b", "a", "c"}, 2},
-		{"tail two", []string{"a", "b", "a", "c", "a"}, -2, []string{"a", "b", "c"}, 2},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			l := listOf(tc.in...)
-			if n := removeCount(l, "a", tc.count); n != tc.n {
-				t.Errorf("removed got %d, want %d", n, tc.n)
-			}
-			if got := listStrings(l); !slices.Equal(got, tc.want) {
-				t.Errorf("got %v, want %v", got, tc.want)
-			}
-		})
+	if n := l.Filter(func(int, []byte) bool { return false }); n != 2 || l.Len() != 0 {
+		t.Errorf("drop-all removed %d, len %d", n, l.Len())
 	}
 }
 

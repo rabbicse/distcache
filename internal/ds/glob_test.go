@@ -54,6 +54,8 @@ func TestMatch_Table(t *testing.T) {
 		{"trailing backslash literal", `abc\`, `abc\`, false, true},
 		{"empty pattern empty string", "", "", false, true},
 		{"empty pattern nonempty", "", "a", false, false},
+		// characterization: verify vs redis-server in Task 11 differential (KEYS * with empty key, PSUBSCRIBE *)
+		{"star vs empty string", "*", "", false, false},
 		{"unicode bytes", "h?llo", "h\xc3llo", false, true},
 	}
 	for _, tc := range tests {
