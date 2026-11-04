@@ -35,6 +35,10 @@ type Writer struct {
 	buf []byte
 	err error
 
+	// locked is set (owner goroutine only) while the caller holds Mu around a
+	// multi-step write; auto-flushing is suppressed so it cannot re-lock Mu.
+	locked bool
+
 	// nflush counts writes to Out. It is atomic because Flush may run while
 	// another goroutine holds Mu and reads Flushes.
 	nflush atomic.Uint64
@@ -81,6 +85,17 @@ func (w *Writer) Flush() error {
 		w.Mu.Lock()
 		defer w.Mu.Unlock()
 	}
+	return w.FlushLocked()
+}
+
+// SetLockedSection marks that the owning goroutine holds Mu. While set,
+// writes never auto-flush (the buffer just grows), because the flush would
+// re-lock Mu and deadlock; end the section with FlushLocked. Owner only.
+func (w *Writer) SetLockedSection(on bool) { w.locked = on }
+
+// FlushLocked writes buffered bytes to Out without taking Mu. The caller must
+// hold Mu (or have no Mu). Owner goroutine only.
+func (w *Writer) FlushLocked() error {
 	if w.Out == nil || len(w.buf) == 0 {
 		return w.err
 	}
@@ -97,7 +112,7 @@ func (w *Writer) Flush() error {
 }
 
 func (w *Writer) maybeFlush() {
-	if w.Out != nil && len(w.buf) >= flushThreshold {
+	if w.Out != nil && !w.locked && len(w.buf) >= flushThreshold {
 		_ = w.Flush()
 	}
 }

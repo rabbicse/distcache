@@ -200,16 +200,32 @@ func (c *Ctx) subscribe(kind subKind) {
 	if *m == nil {
 		*m = map[string]struct{}{}
 	}
-	// Ordering guarantee: for a direct (non-queued) subscribe, the acks are
-	// written and flushed to the socket before the client is added to the
-	// hub, so no push for these channels can be produced ahead of its ack.
-	// The flush takes the write mutex itself; wmu is never held across it.
-	var added []string
+	direct := c.W == cl.w
+	if direct {
+		// Drain earlier pipelined replies without holding wmu, then hold
+		// wmu across hub registration and the acks. The push goroutine
+		// blocks on wmu meanwhile, so the acks precede every push and any
+		// PUBLISH after the ack is delivered (registration is complete
+		// before the ack can be read). Auto-flush is suppressed because it
+		// would re-lock wmu through W.Mu.
+		_ = c.W.Flush()
+		cl.wmu.Lock()
+		c.W.SetLockedSection(true)
+		defer func() {
+			_ = c.W.FlushLocked()
+			c.W.SetLockedSection(false)
+			cl.wmu.Unlock()
+		}()
+	}
+	// Queued path (MULTI/script): the ack is buffered in another writer, so
+	// it can trail a push. Pre-existing and minor.
 	for _, a := range c.Args[1:] {
 		name := string(a)
 		if _, ok := (*m)[name]; !ok {
 			(*m)[name] = struct{}{}
-			added = append(added, name)
+			h.mu.Lock()
+			hubAdd(h.hubMap(kind), name, cl)
+			h.mu.Unlock()
 		}
 		cl.updateSubCounts()
 		c.W.WritePushLen(3)
@@ -221,14 +237,6 @@ func (c *Ctx) subscribe(kind subKind) {
 			c.W.WriteInt(int64(cl.nsubs.Load() + cl.npsubs.Load()))
 		}
 	}
-	if c.W == cl.w {
-		_ = c.W.Flush()
-	}
-	h.mu.Lock()
-	for _, name := range added {
-		hubAdd(h.hubMap(kind), name, cl)
-	}
-	h.mu.Unlock()
 }
 
 func (c *Ctx) unsubscribe(kind subKind) {
