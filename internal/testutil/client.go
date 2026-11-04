@@ -177,9 +177,19 @@ func StartServerOpts(t testing.TB, o Options) (*server.Server, string) {
 	return s, s.Addr()
 }
 
-// StartRedis starts a real redis-server if available; ok=false otherwise.
+// StartRedis returns the address of a real Redis to compare against; ok=false
+// means none is available and callers should skip.
+//
+// If REDIS_SERVER_ADDR is set (CI provides a redis:8.4 service) that server is
+// used: it is PINGed, skipped if its redis_version is below 8.4, and FLUSHALLed
+// on cleanup. That server is shared, so tests using it must NOT run in
+// parallel (no t.Parallel). Otherwise a private redis-server child process is
+// started on a free port (unless DISTCACHE_SKIP_REDIS is set).
 func StartRedis(t testing.TB) (addr string, ok bool) {
 	t.Helper()
+	if env := os.Getenv("REDIS_SERVER_ADDR"); env != "" {
+		return useExternalRedis(t, env)
+	}
 	bin, err := exec.LookPath("redis-server")
 	if err != nil || os.Getenv("DISTCACHE_SKIP_REDIS") != "" {
 		return "", false
@@ -226,4 +236,49 @@ func RedisVersion(c *Client) string {
 		}
 	}
 	return ""
+}
+
+// useExternalRedis validates and adopts the Redis at addr.
+func useExternalRedis(t testing.TB, addr string) (string, bool) {
+	t.Helper()
+	c, err := Dial(addr)
+	if err != nil {
+		t.Fatalf("REDIS_SERVER_ADDR=%s: %v", addr, err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	if v, err := c.Do("PING"); err != nil || string(v.Str) != "PONG" {
+		t.Fatalf("REDIS_SERVER_ADDR=%s: PING failed: %v %q", addr, err, v.Str)
+	}
+	if ver := RedisVersion(c); !versionAtLeast(ver, 8, 4) {
+		t.Skipf("REDIS_SERVER_ADDR reports redis_version %q, need >= 8.4", ver)
+	}
+	t.Cleanup(func() {
+		fc, err := Dial(addr)
+		if err != nil {
+			t.Errorf("FLUSHALL dial: %v", err)
+			return
+		}
+		defer func() { _ = fc.Close() }()
+		if _, err := fc.Do("FLUSHALL"); err != nil {
+			t.Errorf("FLUSHALL: %v", err)
+		}
+	})
+	if _, err := c.Do("FLUSHALL"); err != nil {
+		t.Fatalf("FLUSHALL: %v", err)
+	}
+	return addr, true
+}
+
+// versionAtLeast reports whether a "major.minor[.patch]" string is >= major.minor.
+func versionAtLeast(ver string, major, minor int) bool {
+	parts := strings.SplitN(ver, ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	ma, err1 := strconv.Atoi(parts[0])
+	mi, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return ma > major || (ma == major && mi >= minor)
 }
