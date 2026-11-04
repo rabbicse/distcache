@@ -1,8 +1,10 @@
 package ds
 
 import (
+	"bytes"
 	"fmt"
 	"math"
+	"strconv"
 	"testing"
 )
 
@@ -188,5 +190,80 @@ func TestMurmurHash64A_Properties(t *testing.T) {
 	}
 	if MurmurHash64A([]byte("a"), 1) == MurmurHash64A([]byte("a"), 2) {
 		t.Error("seed ignored")
+	}
+}
+
+func TestHLLSet_SparseOpcodes(t *testing.T) {
+	hdr := func(b []byte) []byte { return b[hllHdrSize:] }
+	tests := []struct {
+		name  string
+		index int
+		count uint8
+		want  []byte
+	}{
+		{"first register", 0, 1, []byte{0x80, 0x7f, 0xfe}},
+		{"xzero split", 100, 3, []byte{0x40, 0x63, 0x88, 0x7f, 0x9a}},
+		{"zero split", 10, 2, []byte{0x09, 0x84, 0x7f, 0xf4}},
+		{"last register", hllRegisters - 1, 1, []byte{0x7f, 0xfe, 0x80}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, r := HLLSet(NewHLLSparse(), tc.index, tc.count)
+			if r != 1 || !bytes.Equal(hdr(b), tc.want) {
+				t.Fatalf("got r=%d %x, want r=1 %x", r, hdr(b), tc.want)
+			}
+			if b[15]&hllCacheInvalid == 0 {
+				t.Error("cache not invalidated")
+			}
+		})
+	}
+}
+
+func TestHLLSet_SparseMergesAdjacentVals(t *testing.T) {
+	b := NewHLLSparse()
+	b, _ = HLLSet(b, 1, 2)
+	b, _ = HLLSet(b, 0, 2)
+	if want := []byte{0x85, 0x7f, 0xfd}; !bytes.Equal(b[hllHdrSize:], want) {
+		t.Fatalf("got %x, want %x", b[hllHdrSize:], want)
+	}
+	if _, r := HLLSet(b, 0, 1); r != 0 {
+		t.Errorf("lower count: got r=%d, want 0", r)
+	}
+}
+
+func TestHLLAdd_SparseMatchesRegistersAndPromotes(t *testing.T) {
+	b := NewHLLSparse()
+	ref := &HLL{}
+	for i := range 5000 {
+		ele := []byte("e" + strconv.Itoa(i))
+		ref.Add(ele)
+		var r int
+		if b, r = HLLAdd(b, ele); r < 0 {
+			t.Fatalf("add %d: corrupt", i)
+		}
+		if b[4] == hllSparse && len(b) > HLLSparseMaxBytes {
+			t.Fatalf("sparse length %d exceeds %d", len(b), HLLSparseMaxBytes)
+		}
+		if i == 10 {
+			if b[4] != hllSparse {
+				t.Fatal("small HLL is not sparse")
+			}
+			if got, ok := DecodeHLL(b); !ok || got.Reg != ref.Reg {
+				t.Fatal("sparse registers differ from reference")
+			}
+		}
+	}
+	if b[4] != hllDense || len(b) != HLLDenseSize {
+		t.Fatalf("got encoding %d len %d, want dense", b[4], len(b))
+	}
+	if got, ok := DecodeHLL(b); !ok || got.Reg != ref.Reg {
+		t.Fatal("dense registers differ from reference")
+	}
+}
+
+func TestHLLSet_CorruptSparse(t *testing.T) {
+	b := append(NewHLLSparse()[:hllHdrSize], 0x00) // one ZERO covering register 0 only
+	if _, r := HLLSet(b, 5, 1); r != -1 {
+		t.Errorf("got r=%d, want -1", r)
 	}
 }

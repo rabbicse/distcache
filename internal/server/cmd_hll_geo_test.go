@@ -171,7 +171,6 @@ func TestHllGeoCommandsDifferential(t *testing.T) {
 // Redis creates small HLLs in the sparse encoding (byte 4 of the header is 1)
 // and only promotes them to dense past hll-sparse-max-bytes.
 func TestHllGeoCommands_SparseEncoding(t *testing.T) {
-	t.Skip("known bug B17: HLL values are always stored dense, so GET/STRLEN/GETRANGE of a small HLL differ from Redis (ds/hll.go stores only the dense format)")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S(":1", "PFADD", "h", "a", "b", "c"),
@@ -209,7 +208,6 @@ func TestHllGeoCommands_DenseEstimate(t *testing.T) {
 // Redis accepts a sparse header and only detects the corruption while
 // summing the registers in PFCOUNT.
 func TestHllGeoCommands_CorruptSparseHLL(t *testing.T) {
-	t.Skip("known bug B18: PFCOUNT on a corrupt sparse HLL replies WRONGTYPE instead of INVALIDOBJ (cmd_hll_geo.go:28 maps every decode failure to errNotHLL)")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S("+OK", "SET", "bad", corruptSparseHLL),
@@ -219,7 +217,6 @@ func TestHllGeoCommands_CorruptSparseHLL(t *testing.T) {
 
 // Redis's geoaddCommand folds XX+NX into its argument-count syntax check.
 func TestHllGeoCommands_GeoAddXXNX(t *testing.T) {
-	t.Skip("known bug B19: GEOADD XX NX and a bad argument count reply custom texts instead of plain syntax error (cmd_hll_geo.go:168 and its arg-count check)")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S(errSyntax, "GEOADD", "g", "XX", "NX", "1", "1", "x"),
