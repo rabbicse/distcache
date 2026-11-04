@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Runs the load matrix against DistCache (and Redis, if redis-server is on
 # PATH) and writes bench/results/<date>-<host>.md. Override the request count
-# with BENCH_N for a quicker run.
+# with BENCH_N for a quicker run. Set BENCH_PREBUILT=1 to use existing bin/
+# binaries (for example inside a container without Go; BENCH_GO_VERSION then
+# names the toolchain that built them), BENCH_HOST to name the result file
+# when the hostname is meaningless (containers) and BENCH_NOTE to record how
+# the run was set up.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,8 +23,11 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p bin bench/results
-go build -o bin/distcache-server ./cmd/distcache-server
-go build -o bin/distcache-bench ./cmd/distcache-bench
+if [ "${BENCH_PREBUILT:-0}" != 1 ]; then
+  go build -o bin/distcache-server ./cmd/distcache-server
+  go build -o bin/distcache-bench ./cmd/distcache-bench
+fi
+GOVER="$(go version 2>/dev/null || echo "${BENCH_GO_VERSION:-unknown} (prebuilt binaries)")"
 
 wait_port() { # port
   for _ in $(seq 1 100); do
@@ -46,18 +53,23 @@ if command -v redis-server >/dev/null 2>&1; then
 fi
 
 NCPU="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
-OUT="bench/results/$(date +%F)-$(hostname -s).md"
+OUT="bench/results/$(date +%F)-${BENCH_HOST:-$(hostname -s)}.md"
 {
   echo "# DistCache benchmark $(date +%F)"
   echo
   echo '```'
-  echo "go:   $(go version)"
+  echo "go:   $GOVER"
   echo "uname: $(uname -a)"
   echo "cpus: $NCPU"
   if [ "$(uname)" = Darwin ]; then
     echo "cpu:  $(sysctl -n machdep.cpu.brand_string)"
     echo "mem:  $(( $(sysctl -n hw.memsize) / 1073741824 )) GiB"
+  elif [ -r /proc/meminfo ]; then
+    model="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//' || true)"
+    echo "cpu:  ${model:-$(uname -m) (model not exposed; see note)}"
+    echo "mem:  $(awk '/MemTotal/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
   fi
+  if [ -n "${BENCH_NOTE:-}" ]; then echo "note: $BENCH_NOTE"; fi
   echo '```'
   echo
   echo "Requests per test: $N, tests: $TESTS, keyspace 100000, data size 3 bytes."
@@ -89,7 +101,7 @@ for P in 1 16; do
       echo "|---|---:|---:|---:|---:|---:|"
       awk -F, '
         FILENAME == ARGV[1] { rd[$1]=$2; next }
-        { r = ($1 in rd) ? rd[$1] : "n/a"
+        { r = ($1 in rd) ? sprintf("%.0f", rd[$1]) : "n/a"
           ratio = ($1 in rd) ? sprintf("%.2f", $2/rd[$1]) : "n/a"
           printf "| %s | %.0f | %s | %s | %s | %s |\n", $1, $2, r, ratio, $3, $5 }
       ' "$TMP/rd.csv" "$TMP/dc.csv"

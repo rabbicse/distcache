@@ -28,7 +28,7 @@ bench:
 	./bench/run.sh
 
 microbench:
-	@echo "added in Task 16"
+	go test -run '^$$' -bench . -benchmem ./internal/server ./internal/resp ./internal/storage
 
 docker:
 	docker build -t distcache:dev .
