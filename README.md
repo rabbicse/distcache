@@ -1,210 +1,178 @@
 # DistCache
 
-A high‑performance **distributed in‑memory cache** written in **Go**.
+DistCache is a Redis-compatible in-memory server written in Go with no
+dependencies outside the standard library (it ships its own Lua 5.1
+interpreter for scripting). It targets Redis 8.4 command semantics and reply
+formats, so existing Redis clients work unchanged. The main difference from
+Redis is execution: commands run concurrently on all cores against a sharded
+keyspace instead of on a single thread. Linux and macOS are the supported
+platforms; Windows compiles but is not tested.
 
-DistCache is designed as a Redis‑compatible caching system that supports clustering, replication, and high throughput. The goal of the project is to demonstrate modern distributed systems design including networking, persistence, sharding, and observability.
+## Status
 
----
+| Area | Status |
+|---|---|
+| Strings, bitmaps, lists, hashes (incl. field TTL, `HGETDEL`/`HGETEX`/`HSETEX`), sets, sorted sets, streams, geo, HyperLogLog | implemented |
+| Transactions (`MULTI`/`EXEC`/`WATCH`), pub/sub (incl. sharded), keyspace notifications, `MONITOR` | implemented |
+| Lua scripting (`EVAL`, `EVALSHA`, `SCRIPT`) and functions (`FUNCTION`, `FCALL`) | implemented |
+| RESP2 and RESP3 (`HELLO`), client-side `CLIENT` commands | implemented |
+| Persistence: snapshots (`SAVE`/`BGSAVE`), AOF with snapshot preamble, `BGREWRITEAOF` | implemented |
+| Replication: master to replica with partial resync (`PSYNC`), `WAIT`/`WAITAOF` | implemented |
+| Eviction: LRU, LFU, random and TTL policies under `maxmemory` | implemented |
+| ACL | partial: single `default` user backed by `requirepass` |
+| `LATENCY`, `DEBUG`, `MODULE` | partial: canned replies |
+| Automatic AOF rewrite, multi-part AOF, `min-replicas-to-write` | planned |
+| Cluster mode (Redis Cluster client contract), TLS, full ACL users | planned |
+| Redis 8 module types (JSON, query engine, time series, probabilistic, vector sets) | planned |
 
-# Features
+Known differences from Redis 8.4 are tracked as tests: intentional ones in
+`testutil.KnownDivergences`
+([internal/testutil/differential.go](internal/testutil/differential.go)),
+open bugs as skipped tests in
+[internal/server/redis84_divergence_test.go](internal/server/redis84_divergence_test.go).
 
-* Redis compatible RESP protocol
-* High performance TCP server
-* Distributed cluster support
-* Consistent hashing for sharding
-* In‑memory key‑value storage
-* TTL expiration engine
-* Persistence (Append Only File / Snapshot)
-* Pub/Sub messaging
-* Replication (Master → Replica)
-* Prometheus metrics
-* Structured logging
-* Graceful shutdown
+## Quick start
 
----
+Requires Go 1.27.
 
-# Architecture
-
-```
-                Clients
-                   │
-               TCP Server
-                   │
-               RESP Parser
-                   │
-              Command Router
-                   │
-             Execution Engine
-                   │
-              In‑Memory Store
-                   │
-      ┌────────────┴────────────┐
-      │                         │
- Persistence (AOF/RDB)     Replication
-      │                         │
-   Storage                Replica Nodes
+```sh
+go run ./cmd/distcache-server --port 6379
+redis-cli -p 6379 SET greeting hello
+redis-cli -p 6379 GET greeting
 ```
 
-Cluster architecture:
+Build binaries into `bin/` with `make build`, or run in Docker:
 
-```
-               Load Balancer
-                     │
-           ┌─────────┴─────────┐
-           │                   │
-      ClusterCache Node    ClusterCache Node
-           │                   │
-      Local Memory Store  Local Memory Store
+```sh
+make docker                       # builds distcache:dev
+docker run --rm -p 6379:6379 distcache:dev
 ```
 
----
+## Configuration
 
-# Project Structure
+DistCache reads redis.conf-style files and redis-server-style flags; flags
+override the file:
 
-```
-clustercache
-│
-├── cmd/
-│   └── server/
-│
-├── internal/
-│   ├── server/
-│   ├── protocol/
-│   ├── command/
-│   ├── storage/
-│   ├── persistence/
-│   ├── cluster/
-│   └── metrics/
-│
-├── pkg/
-│   └── logger/
-│
-├── configs/
-│
-├── Dockerfile
-└── README.md
+```sh
+go run ./cmd/distcache-server /path/to/distcache.conf --maxmemory 2gb --appendonly yes
 ```
 
----
+Defaults: port 6379, snapshot file `dump.dcs`, AOF file `appendonly.aof`,
+256 keyspace shards (`--shards`, a power of two). `CONFIG GET *` lists every
+supported parameter; `CONFIG SET` and `CONFIG REWRITE` work as in Redis.
+redis.conf directives DistCache does not implement are accepted and ignored.
 
-# Quick Start
+## Architecture
 
-## Requirements
+Each connection has its own goroutine. A command is parsed, checked the way
+Redis checks it (arity, auth, `MULTI` queueing, OOM, read-only replica...),
+then executed under the locks of exactly the shards its keys hash to.
+Multi-key commands lock shards in ascending order; `MULTI`/`EXEC` and scripts
+hold their locks for their whole duration, so they stay atomic.
 
-* Go 1.22+
-* Docker (optional)
-
-## Run Locally
-
-```
-go run cmd/server/main.go
-```
-
-Server starts on:
-
-```
-localhost:6379
-```
-
----
-
-# Example Usage
-
-Using redis-cli:
-
-```
-redis-cli -p 6379
+```mermaid
+flowchart LR
+  C[Client] -->|RESP| R[RESP reader]
+  R --> D[processCommand: pre-exec checks]
+  D --> L[Lock key shards]
+  L --> H[Command handler]
+  H --> P[Propagation: AOF, backlog, replicas]
+  H --> W[WATCH, blocked clients, notifications]
+  H -->|reply| C
 ```
 
-Commands:
+Write effects are serialized into one ordered stream that feeds the AOF, the
+replication backlog and connected replicas. Snapshots are copy-on-write and
+point-in-time, so `BGSAVE` does not stop writers.
 
-```
-PING
-SET name mehedi
-GET name
-DEL name
-```
-
----
-
-# Configuration
-
-Example configuration file:
-
-```
-server:
-  port: 6379
-
-cluster:
-  enabled: true
-  node_id: node1
-
-persistence:
-  aof: true
-  snapshot_interval: 300
+```mermaid
+flowchart LR
+  H[Write handlers] --> S[Ordered propagation stream]
+  S --> A[AOF file]
+  S --> B[Replication backlog]
+  B --> RP[Replicas: PSYNC partial resync]
+  K[Sharded keyspace] -->|copy-on-write| SN[DCSNAP snapshot]
+  SN --> F[dump.dcs / AOF preamble / full sync]
 ```
 
----
+## Compatibility
 
-# Metrics
+- Protocol: RESP2 and RESP3.
+- Replies and error texts follow Redis 8.4; a differential test suite runs
+  the same scripts against DistCache and a real `redis-server` 8.4 and fails on
+  any difference not on the allowlist.
+- On-disk format: snapshots, `DUMP` payloads and full-sync transfers use
+  DistCache's own `DCSNAP` format, which is **not** RDB-compatible.
 
-ClusterCache exposes Prometheus metrics:
+## Performance
+
+`make bench` builds `bin/distcache-bench` (redis-benchmark-style flags) and
+runs a fixed matrix against DistCache and, if `redis-server` is on `PATH`,
+Redis on the same machine. Results are written to
+[bench/results/](bench/results/); see its README for the matrix. The first
+measured comparison is
+[bench/results/2026-11-05-docker-linux-arm64-m1.md](bench/results/2026-11-05-docker-linux-arm64-m1.md).
+
+Honest summary of today's baseline (8 vCPUs, load tool on the same VM):
+unpipelined, DistCache is 1.2–1.6x Redis for most tests but about half of
+Redis for `ZADD`; with `-P 16` and 50 clients strings are faster but writes to
+one hot set/hash/sorted-set key are about half of Redis; with `-P 16` and 500
+clients DistCache is slower than Redis on every test (0.3–0.8x). Concurrency
+only helps when commands touch different shards, and the shared hot spots on
+the write path cap pipelined throughput. Removing them is the next
+sub-project.
+
+`make microbench` runs Go microbenchmarks for dispatch, RESP parsing and the
+keyspace ([bench/results/microbench-baseline.txt](bench/results/microbench-baseline.txt)).
+
+## Testing
+
+```sh
+make test        # go test -race ./... (unit + integration)
+make test-e2e    # test/e2e: go-redis client, persistence, replication, resilience
+make test-all    # both
+make lint        # golangci-lint
+make cover       # coverage.out and coverage.html
+```
+
+The differential tests need a Redis 8.4 server: either `redis-server` on
+`PATH` (started per test) or an existing one via
+`REDIS_SERVER_ADDR=host:port` (for example `docker run -p 6391:6379 redis:8.4`).
+Without one they still run every step on DistCache and then skip. Set
+`DISTCACHE_SKIP_REDIS=1` to never start a local `redis-server`.
+
+## Project layout
 
 ```
-/metrics
+cmd/distcache-server   server entry point (cmd/server is a compatibility copy)
+cmd/distcache-bench    load generator
+internal/server        connections, dispatch, command handlers, persistence, replication, scripting
+internal/storage       sharded keyspace, expiry, eviction, snapshot codec
+internal/ds            list, hash, set, sorted set, stream, HLL, geo, glob
+internal/resp          RESP2/RESP3 reader and writer
+internal/lua           Lua 5.1 interpreter
+internal/config        redis.conf parsing and live CONFIG parameters
+internal/testutil      in-process server, Redis differential harness
+test/e2e               end-to-end tests (separate module; uses go-redis)
+bench                  load-test script and results
 ```
 
-Example metrics:
+## Roadmap
 
-* commands_total
-* connections_total
-* memory_usage_bytes
+1. Test harness and baseline (this release).
+2. Single-node throughput: remove shared hot spots so DistCache beats Redis on the same machine.
+3. Cluster mode compatible with Redis Cluster clients.
+4. Production hardening: ACL users, automatic AOF rewrite, `min-replicas`, `FAILOVER`, TLS.
+5. Client examples (Go, Java, Python, Node) and a browser gateway.
+6. Technical guides for each subsystem.
 
----
+Details: [docs/superpowers/specs/2026-11-04-distcache-roadmap-and-test-harness-design.md](docs/superpowers/specs/2026-11-04-distcache-roadmap-and-test-harness-design.md).
 
-# Roadmap
+## Credits
 
-Planned features:
+- [Redis](https://github.com/redis/redis), the reference implementation whose behaviour DistCache follows.
+- [This video](https://www.youtube.com/watch?v=sRXIRikME14&t=178s): inspiration and background.
 
-* Distributed cluster mode
-* Consistent hashing
-* Replication protocol
-* Pub/Sub system
-* Advanced eviction policies
-* Stream processing
-* Multi‑region replication
+## License
 
----
-
-# Benchmark Goals
-
-Target performance:
-
-* 500k+ operations/sec per node
-* sub‑millisecond latency
-
----
-
-# Contributing
-
-Contributions are welcome.
-
-Steps:
-
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request
-
----
-
-# License
-
-MIT License
-
----
-
-# Author
-
-Mehedi Hasan
-
-Distributed Systems & Backend Engineering
+GNU General Public License v3.0; see [LICENSE](LICENSE).

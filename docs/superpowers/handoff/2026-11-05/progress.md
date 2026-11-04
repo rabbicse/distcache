@@ -100,3 +100,13 @@ Task 14: impl d0758e7 (base 398f4d5). B27: replica restart → full resync (snap
 Task 14: complete — d0758e7 — approved (0C/0I). B28: DEBUG not gated by enable-debug-command (Redis 7+ default no) — security-relevant, fold into sub-project 4 hardening. Parked minors: TTL msg ±1s, truncated-tail no log assert, port reuse race.
 Next: Task 15 bench, BASE d0758e7.
 User request 2026-11-04: React web console (RedisInsight-like + better data viz) → new sub-project 7, own spec after sub-project 1.
+
+## Cloud/agent session 2026-11-05 (macOS M1 host, Docker redis:8.4.8)
+Ledger restored from docs/superpowers/handoff/2026-11-05. Work branch pushed to origin test-harness (local branch th-work: test-harness is checked out in the main checkout).
+Differential run vs redis:8.4.8 (REDIS_SERVER_ADDR=127.0.0.1:6391, Docker): divergent steps moved to internal/server/redis84_divergence_test.go as skipped known bugs; TestRedis84Divergences_WantsMatchRedis proves each expectation against real Redis (all 14 fail on DistCache, pass on Redis).
+B17-bytes: closed — sparse HLL GET bytes identical to Redis 8.4.8 (PFADD h a b c → 27-byte sparse HYLL).
+B20: confirmed — STOREDIST self-distance DistCache 8.081279951185197e-14 vs Redis 4.313314116504969e-14.
+B23: confirmed — FUNCTION RESTORE duplicate: Redis "-ERR Library lib already exists" (unquoted; FUNCTION LOAD quotes).
+BUGS B29–B40 (from differential run): B29 GEOPOS/WITHCOORD coordinate formatting (%.17g vs shortest round-trip); B30 GEOSEARCHSTORE WITHDIST error text; B31 GEOSEARCH FROMMEMBER+FROMLONLAT → Redis "syntax error"; B32 EXPIRETIME truncates ms instead of rounding; B33 SELECT x error text (Redis: not an integer); B34 BLMOVE/BRPOPLPUSH timeout reply null bulk vs Redis null array; B35 XREAD unbalanced error text ('+'); B36 ZINTERCARD 0 error text; B37 SCRIPT FLUSH bad option text; B38 FCALL non-integer numkeys text; B39 FUNCTION LIST flags must be status replies; B40 FUNCTION LIST unknown arg text.
+Task 12 minor (geoUnverifiedScript wants) resolved: verified steps now geoErrorScript.
+Commit 4137575 test(server): reconcile differential scripts with Redis 8.4.8.
