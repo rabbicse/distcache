@@ -223,7 +223,6 @@ func TestServerCmdCommands_BgRewriteAOF(t *testing.T) {
 
 // Redis's configRewriteCommand replies without a "Rewriting config file:" prefix.
 func TestServerCmdCommands_ConfigRewriteNoFile(t *testing.T) {
-	t.Skip("known bug B10: CONFIG REWRITE without a config file prefixes the error with 'Rewriting config file: '")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S("-ERR The server is running without a config file", "CONFIG", "REWRITE"),
@@ -232,7 +231,6 @@ func TestServerCmdCommands_ConfigRewriteNoFile(t *testing.T) {
 
 // Redis's ACL LOG RESET clears the log and replies +OK.
 func TestServerCmdCommands_ACLLogReset(t *testing.T) {
-	t.Skip("known bug B11: ACL LOG RESET replies *[] instead of +OK")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S("+OK", "ACL", "LOG", "RESET"),
@@ -241,7 +239,6 @@ func TestServerCmdCommands_ACLLogReset(t *testing.T) {
 
 // Redis rejects an unknown ACL subcommand with the generic subcommand error.
 func TestServerCmdCommands_ACLUnknownSubcommand(t *testing.T) {
-	t.Skip("known bug B12: ACL FOO replies DistCache's 'default user only' error instead of Redis's unknown-subcommand error")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S("-ERR unknown subcommand 'FOO'. Try ACL HELP.", "ACL", "FOO"),

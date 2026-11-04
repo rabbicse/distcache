@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -191,6 +192,10 @@ func cmdClient(c *Ctx) {
 	case "id":
 		c.W.WriteInt(cl.id)
 	case "getname":
+		if len(c.Args) != 2 {
+			c.WrongSubArgs()
+			return
+		}
 		n := cl.name.Load().(string)
 		if n == "" {
 			c.W.WriteNull()
@@ -473,8 +478,13 @@ func clientKill(c *Ctx) {
 			laddr = v
 		case "type":
 			typ = strings.ToLower(v)
-			if typ == "slave" {
+			switch typ {
+			case "slave":
 				typ = "replica"
+			case "normal", "replica", "master", "pubsub":
+			default:
+				c.Err("ERR Unknown client type '" + v + "'")
+				return
 			}
 		case "user":
 			user = v
@@ -563,6 +573,10 @@ func cmdConfig(c *Ctx) {
 		c.W.WriteOK()
 	case "rewrite":
 		if err := cfg.Rewrite(); err != nil {
+			if errors.Is(err, config.ErrNoConfigFile) {
+				c.Err("ERR " + err.Error())
+				return
+			}
 			c.Err("ERR Rewriting config file: " + err.Error())
 			return
 		}
@@ -856,6 +870,11 @@ func cmdACL(c *Ctx) {
 		}
 		c.W.WriteStrings(cats)
 	case "log":
+		// The log is always empty; RESET clears nothing but replies +OK.
+		if len(c.Args) == 3 && strings.EqualFold(c.Arg(2), "reset") {
+			c.W.WriteOK()
+			return
+		}
 		c.W.WriteArrayLen(0)
 	case "getuser":
 		if len(c.Args) != 3 || c.Arg(2) != "default" {
@@ -873,8 +892,10 @@ func cmdACL(c *Ctx) {
 		c.W.WriteBulkString("~*")
 	case "help":
 		c.writeHelp("ACL", []string{"CAT [<category>]", "GETUSER <username>", "LIST", "LOG", "USERS", "WHOAMI"})
-	default:
+	case "setuser", "deluser", "dryrun", "genpass", "load", "save":
 		c.Err("ERR DistCache supports the 'default' user only (requirepass); ACL " + strings.ToUpper(c.Arg(1)) + " is not available")
+	default:
+		c.UnknownSub()
 	}
 }
 

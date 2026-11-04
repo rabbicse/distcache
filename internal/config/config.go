@@ -589,6 +589,10 @@ func (c *Config) Get(pattern string) [][2]string {
 // Has reports whether a parameter exists.
 func (c *Config) Has(name string) bool { _, ok := c.params[strings.ToLower(name)]; return ok }
 
+// ErrNoConfigFile is returned by Rewrite when the server was started without
+// a config file. Its text is Redis's wire error message.
+var ErrNoConfigFile = errors.New("The server is running without a config file")
+
 // LoadFile parses a redis.conf style file and records it as ConfigFile, the
 // target of CONFIG REWRITE. Included files are applied but never become
 // ConfigFile.
@@ -696,7 +700,7 @@ func (c *Config) ParseArgs(args []string) error {
 // Rewrite writes the current configuration to the config file.
 func (c *Config) Rewrite() error {
 	if c.ConfigFile == "" {
-		return errors.New("The server is running without a config file")
+		return ErrNoConfigFile
 	}
 	pairs := c.Get("*")
 	var b strings.Builder

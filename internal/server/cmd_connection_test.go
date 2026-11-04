@@ -147,7 +147,6 @@ func TestConnectionCommands_Shapes(t *testing.T) {
 
 // Redis checks subcommand arity against the full name ("client|getname").
 func TestConnectionCommands_ClientGetNameArity(t *testing.T) {
-	t.Skip("known bug B8: CLIENT GETNAME x ignores the extra argument (cmd_server.go cmdClient case \"getname\")")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S(arityErr("client|getname"), "CLIENT", "GETNAME", "x"),
@@ -156,7 +155,6 @@ func TestConnectionCommands_ClientGetNameArity(t *testing.T) {
 
 // Redis's clientKillCommand rejects an unknown TYPE filter.
 func TestConnectionCommands_ClientKillUnknownType(t *testing.T) {
-	t.Skip("known bug B9: CLIENT KILL TYPE foo replies :0 instead of an error (cmd_server.go clientKill)")
 	_, addr := testutil.StartServer(t, nil)
 	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
 		testutil.S("-ERR Unknown client type 'foo'", "CLIENT", "KILL", "TYPE", "foo"),
