@@ -3,7 +3,6 @@ package server
 import (
 	"math"
 	"strconv"
-	"strings"
 
 	"github.com/rabbicse/distcache/internal/ds"
 	"github.com/rabbicse/distcache/internal/resp"
@@ -775,5 +774,3 @@ func numKeysAt(i int) KeysFunc {
 		return pos, false
 	}
 }
-
-func lowerArg(b []byte) string { return strings.ToLower(string(b)) }

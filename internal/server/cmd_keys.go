@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/rabbicse/distcache/internal/config"
 	"github.com/rabbicse/distcache/internal/ds"
@@ -88,7 +87,7 @@ func expireGeneric(c *Ctx, unitSeconds, absolute bool) {
 		when *= 1000
 	}
 	if !absolute {
-		now := time.Now().UnixMilli()
+		now := c.NowMs()
 		if when > math.MaxInt64-now {
 			c.Err("ERR invalid expire time in '" + cmdName + "' command")
 			return
@@ -113,7 +112,7 @@ func expireGeneric(c *Ctx, unitSeconds, absolute bool) {
 		c.W.WriteInt(0)
 		return
 	}
-	if when <= time.Now().UnixMilli() && !c.isMaster && !c.s.loading.Load() {
+	if when <= c.NowMs() && !c.isMaster && !c.s.loading.Load() {
 		c.DB.Delete(key)
 		c.Dirty(1)
 		c.RewriteStrings("DEL", key)
@@ -151,7 +150,7 @@ func ttlGeneric(c *Ctx, ms, absolute bool) {
 		}
 		return
 	}
-	ttl := e.ExpireAt - time.Now().UnixMilli()
+	ttl := e.ExpireAt - c.NowMs()
 	if ttl < 0 {
 		ttl = 0
 	}
@@ -183,7 +182,7 @@ func cmdKeys(c *Ctx) {
 	all := pat == "*"
 	var out []string
 	c.forEachShard(false, func(i int) bool {
-		db := storage.DB{KS: c.s.ks, Idx: c.DB.Idx, Now: time.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
+		db := storage.DB{KS: c.s.ks, Idx: c.DB.Idx, Now: c.s.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
 		c.s.ks.ForEachInShard(i, c.DB.Idx, func(k string, e *storage.Entry) bool {
 			if db.IsExpired(e) {
 				return true
@@ -250,7 +249,7 @@ func cmdScan(c *Ctx) {
 	for next < n && int64(len(keys)) < count {
 		i := int(next)
 		c.withShard(i, false, func() {
-			db := storage.DB{KS: c.s.ks, Idx: c.DB.Idx, Now: time.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
+			db := storage.DB{KS: c.s.ks, Idx: c.DB.Idx, Now: c.s.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
 			c.s.ks.ForEachInShard(i, c.DB.Idx, func(k string, e *storage.Entry) bool {
 				if db.IsExpired(e) {
 					return true
@@ -281,12 +280,19 @@ func cmdRandomKey(c *Ctx) {
 		return
 	}
 	n := c.s.ks.NumShards()
-	for attempt := 0; attempt < 4*n; attempt++ {
+	// Random sampling first; with few keys it can miss every populated
+	// shard, so fall back to an ordered pass over all shards (from a random
+	// start) so a non-empty database never yields nil.
+	start := rand.IntN(n)
+	for attempt := 0; attempt < 5*n; attempt++ {
 		i := rand.IntN(n)
+		if attempt >= 4*n {
+			i = (start + attempt) % n
+		}
 		var found string
 		var ok bool
 		c.withShard(i, false, func() {
-			db := storage.DB{KS: c.s.ks, Idx: c.DB.Idx, Now: time.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
+			db := storage.DB{KS: c.s.ks, Idx: c.DB.Idx, Now: c.s.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
 			for _, k := range c.s.ks.SampleShard(i, c.DB.Idx, 8, false) {
 				if e := db.Peek(k); e != nil && !db.IsExpired(e) {
 					found, ok = k, true
@@ -662,10 +668,10 @@ func cmdRestore(c *Ctx) {
 		if absttl {
 			at = ttl
 		} else {
-			at = time.Now().UnixMilli() + ttl
+			at = c.NowMs() + ttl
 		}
 	}
-	if at != 0 && at <= time.Now().UnixMilli() && !c.isMaster {
+	if at != 0 && at <= c.NowMs() && !c.isMaster {
 		if c.DB.Delete(key) {
 			c.Dirty(1)
 			c.RewriteStrings("DEL", key)
@@ -679,7 +685,7 @@ func cmdRestore(c *Ctx) {
 		e.SetLRU(c.s.ks.Clock.Load() - uint32(idle))
 	}
 	if freq >= 0 {
-		e.SetLFU(uint32(time.Now().Unix()/60)&65535<<8 | uint32(freq))
+		e.SetLFU(uint32(c.NowTime().Unix()/60)&65535<<8 | uint32(freq))
 	}
 	c.DB.Set(key, e)
 	c.Dirty(1)

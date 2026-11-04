@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/rabbicse/distcache/internal/resp"
 	"github.com/rabbicse/distcache/internal/storage"
@@ -146,6 +147,14 @@ type Ctx struct {
 	blockDeadlineMs int64
 	errored         bool
 }
+
+// NowMs returns the command's frozen data-path time in Unix milliseconds. It
+// comes from the server's injectable clock (Server.SetClock) and is fixed for
+// the duration of the call, as Redis does for a command or script.
+func (c *Ctx) NowMs() int64 { return c.DB.Now }
+
+// NowTime returns NowMs as a time.Time.
+func (c *Ctx) NowTime() time.Time { return time.UnixMilli(c.DB.Now) }
 
 // execUnit groups propagation for one atomic execution (command, EXEC,
 // script) so it is written to AOF/replicas as a single block.

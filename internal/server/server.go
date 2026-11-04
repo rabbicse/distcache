@@ -140,6 +140,15 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 	return s
 }
 
+// SetClock replaces the data-path clock used for expiry, TTLs, LRU/LFU and
+// stream IDs. Call it before Start; it delegates to the keyspace so there is
+// a single source of truth. Wall-clock observability (client ages, slowlog,
+// uptime, latency) keeps using real time.
+func (s *Server) SetClock(now func() time.Time) { s.ks.SetClock(now) }
+
+// Now returns the current data-path time (see SetClock).
+func (s *Server) Now() time.Time { return s.ks.Now() }
+
 // Config returns the live configuration.
 func (s *Server) Config() *config.Config { return s.cfg }
 
@@ -180,7 +189,7 @@ func (s *Server) Start() error {
 		ln, err := lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			for _, l := range lns {
-				l.Close()
+				_ = l.Close() // best-effort: cleanup after failure or teardown
 			}
 			return err
 		}
@@ -251,7 +260,7 @@ func (s *Server) acceptLoop(ln net.Listener) error {
 		if n >= s.cfg.MaxClients.Load() {
 			s.stats.rejected.Add(1)
 			_, _ = conn.Write([]byte("-ERR max number of clients reached\r\n"))
-			conn.Close()
+			_ = conn.Close() // best-effort: cleanup after failure or teardown
 			continue
 		}
 		if tc, ok := conn.(*net.TCPConn); ok {
@@ -274,7 +283,7 @@ func (s *Server) Shutdown(save bool) error {
 		s.closing.Store(true)
 		s.lnMu.Lock()
 		for _, ln := range s.listeners {
-			ln.Close()
+			_ = ln.Close() // best-effort: cleanup after failure or teardown
 		}
 		s.lnMu.Unlock()
 		s.repl.stop()
@@ -288,7 +297,7 @@ func (s *Server) Shutdown(save bool) error {
 		close(s.done)
 		s.clientsMu.RLock()
 		for _, c := range s.clients {
-			c.conn.Close()
+			_ = c.conn.Close() // best-effort: teardown
 		}
 		s.clientsMu.RUnlock()
 		if s.cfg.UnixSocket != "" {
@@ -319,7 +328,7 @@ func (s *Server) cron() {
 		}
 		loops++
 		now := time.Now()
-		s.ks.Clock.Store(uint32(now.Unix()))
+		s.ks.Clock.Store(uint32(s.Now().Unix()))
 		s.ks.LFULogFactor.Store(s.cfg.LFULogFactor.Load())
 		s.ks.LFUDecayTime.Store(s.cfg.LFUDecayTime.Load())
 		if s.cfg.ActiveExpire.Load() && !s.repl.isReplica() && !s.loading.Load() {
@@ -380,7 +389,7 @@ func (s *Server) checkClientTimeouts(now time.Time) {
 			continue
 		}
 		if now.Unix()-c.lastInteraction.Load() > to {
-			c.conn.Close()
+			_ = c.conn.Close() // best-effort: teardown
 		}
 	}
 }

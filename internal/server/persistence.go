@@ -36,7 +36,7 @@ func (s *Server) loadData() error {
 		}
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // best-effort: read-only or teardown
 	n, err := s.loadSnapshot(bufio.NewReaderSize(f, 1<<16))
 	if err != nil {
 		return fmt.Errorf("loading %s: %w", s.snapshotPath(), err)
@@ -62,7 +62,7 @@ func (s *Server) loadKey(db int, key string, v any, exp int64) bool {
 	if db >= s.ks.NumDB {
 		return false
 	}
-	now := time.Now().UnixMilli()
+	now := s.Now().UnixMilli()
 	if exp != 0 && exp <= now && !s.repl.isReplica() {
 		return false
 	}
@@ -122,7 +122,7 @@ func (s *Server) saveSync() error {
 		err = os.Rename(tmp, path)
 	}
 	if err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp) // best-effort: cleanup after failure or teardown
 		s.stats.lastBgsaveOK.Store(false)
 		s.log.Warn("failed saving the DB", "err", err)
 		return err

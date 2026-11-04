@@ -1,0 +1,56 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+# golangci-lint v2 merged gosimple into staticcheck, so enabling staticcheck
+# covers the originally planned gosimple as well.
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+
+  exclusions:
+    rules:
+      # Pre-existing baseline findings. Each rule is excluded rather than fixed
+      # to avoid refactoring existing code; tighten these over time.
+      # Many error strings are Redis wire replies that must match Redis exactly.
+      - linters: [staticcheck]
+        text: "ST1005"
+      # Stylistic QF (quickfix) suggestions in existing code; not worth churn.
+      - linters: [staticcheck]
+        text: "QF10"
+      # Unused fields kept as placeholders for Redis INFO/CONFIG parity; removing
+      # them is a refactor outside the tooling task. One rule per symbol.
+      - linters: [unused]
+        text: "^field notifyFlagsStr is unused"
+      - linters: [unused]
+        text: "^field maxClientsStr is unused"
+      - linters: [unused]
+        text: "^field nextIndex is unused"
+      - linters: [unused]
+        text: "^field writes is unused"
+      - linters: [unused]
+        text: "^field lastFsync is unused"
+      - linters: [unused]
+        text: "^field desc is unused"
+      - linters: [unused]
+        text: "^field expiredStalePerc is unused"
+      - linters: [unused]
+        text: "^field totalReadsProc is unused"
+      - linters: [unused]
+        text: "^field unexpectedErrors is unused"
+      - linters: [unused]
+        text: "^field pauseMu is unused"
+      - linters: [unused]
+        text: "^field r is unused"
+      - linters: [unused]
+        text: "^field crc is unused"
+      # Existing code assigns a loop variable that is not read afterwards.
+      - linters: [ineffassign]
+        path: internal/server/cmd_hll_geo\.go
+        text: "ineffectual assignment to i"

@@ -5,6 +5,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -21,8 +23,25 @@ var (
 type Writer struct {
 	Out   io.Writer
 	Proto int
-	buf   []byte
-	err   error
+
+	// Mu, when non-nil, is the mutex that serialises every write to Out
+	// (the owning client's write mutex). Flush holds it around the Out.Write
+	// call so out-of-band writers that lock the same mutex cannot interleave
+	// bytes with a reply. It guards only the write to Out, not buf.
+	Mu *sync.Mutex
+
+	// buf, err and the Truncate/Len/append paths belong to the single
+	// goroutine that owns the Writer; they are not safe for concurrent use.
+	buf []byte
+	err error
+
+	// locked is set (owner goroutine only) while the caller holds Mu around a
+	// multi-step write; auto-flushing is suppressed so it cannot re-lock Mu.
+	locked bool
+
+	// nflush counts writes to Out. It is atomic because Flush may run while
+	// another goroutine holds Mu and reads Flushes.
+	nflush atomic.Uint64
 }
 
 const flushThreshold = 64 * 1024
@@ -41,15 +60,47 @@ func (w *Writer) Reset() { w.buf = w.buf[:0] }
 // Len returns the number of buffered bytes.
 func (w *Writer) Len() int { return len(w.buf) }
 
+// Truncate shrinks the buffered data to its first n bytes, discarding a
+// partially written reply. It is a no-op when n is negative or not smaller
+// than Len; bytes already flushed to Out cannot be taken back.
+func (w *Writer) Truncate(n int) {
+	if n >= 0 && n < len(w.buf) {
+		w.buf = w.buf[:n]
+	}
+}
+
+// Flushes returns how many times buffered data was actually written to Out.
+// Callers compare it before and after an operation to learn whether bytes of
+// a partial reply have already left the buffer (and so cannot be Truncated).
+func (w *Writer) Flushes() uint64 { return w.nflush.Load() }
+
 // Err returns the first write error.
 func (w *Writer) Err() error { return w.err }
 
-// Flush writes buffered bytes to Out.
+// Flush writes buffered bytes to Out, holding Mu (if set) for the write only;
+// buffer handling stays on the owning goroutine. The caller must not already
+// hold Mu, and nothing in this package takes Mu anywhere else.
 func (w *Writer) Flush() error {
+	if w.Mu != nil {
+		w.Mu.Lock()
+		defer w.Mu.Unlock()
+	}
+	return w.FlushLocked()
+}
+
+// SetLockedSection marks that the owning goroutine holds Mu. While set,
+// writes never auto-flush (the buffer just grows), because the flush would
+// re-lock Mu and deadlock; end the section with FlushLocked. Owner only.
+func (w *Writer) SetLockedSection(on bool) { w.locked = on }
+
+// FlushLocked writes buffered bytes to Out without taking Mu. The caller must
+// hold Mu (or have no Mu). Owner goroutine only.
+func (w *Writer) FlushLocked() error {
 	if w.Out == nil || len(w.buf) == 0 {
 		return w.err
 	}
 	if w.err == nil {
+		w.nflush.Add(1)
 		_, w.err = w.Out.Write(w.buf)
 	}
 	if cap(w.buf) > 1<<20 {
@@ -61,7 +112,7 @@ func (w *Writer) Flush() error {
 }
 
 func (w *Writer) maybeFlush() {
-	if w.Out != nil && len(w.buf) >= flushThreshold {
+	if w.Out != nil && !w.locked && len(w.buf) >= flushThreshold {
 		_ = w.Flush()
 	}
 }

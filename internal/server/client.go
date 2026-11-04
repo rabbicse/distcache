@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,7 +28,7 @@ type Client struct {
 	conn  net.Conn
 	r     *resp.Reader
 	w     *resp.Writer
-	wmu   sync.Mutex
+	wmu   sync.Mutex // serialises every write to conn: replies (via w.Mu), pushes, replication
 	db    int
 	proto int
 
@@ -83,6 +84,7 @@ func (s *Server) newClient(conn net.Conn) *Client {
 		laddr:     conn.LocalAddr().String(),
 	}
 	c.w = resp.NewWriter(&countingWriter{conn, &s.stats.netOutput}, 2)
+	c.w.Mu = &c.wmu
 	c.r.MaxBulkLen = s.cfg.ProtoMaxBulkLen.Load()
 	c.name.Store("")
 	c.libName.Store("")
@@ -120,18 +122,28 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// flush sends buffered replies.
+// flush sends buffered replies. The writer takes wmu itself (see newClient),
+// so callers must not hold wmu.
 func (c *Client) flush() error {
-	c.wmu.Lock()
-	err := c.w.Flush()
-	c.wmu.Unlock()
-	return err
+	return c.w.Flush()
 }
 
 func (c *Client) inPubSub() bool { return c.subCount.Load() > 0 }
 
+// serveClient runs the read-execute-reply loop for one connection. A panic
+// outside command handlers (parsing, reply writing, replication hand-over) is
+// logged and closes only this client, never the process. Limit: such a panic
+// is not expected while shard locks are held (call releases them on the
+// normal path, and handler panics are recovered below it); if one did occur
+// the locks would stay held, so this guard is a last resort, not a proof.
 func (s *Server) serveClient(c *Client) {
 	defer s.closeClient(c)
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("client loop panic", "client", c.id, "err", r, "stack", string(debug.Stack()))
+			s.stats.unexpectedErrors.Add(1)
+		}
+	}()
 	for {
 		if to := s.cfg.Timeout.Load(); to > 0 && !c.inPubSub() && !c.isMaster && !c.isReplica {
 			_ = c.conn.SetReadDeadline(time.Now().Add(time.Duration(to) * time.Second))
@@ -170,7 +182,7 @@ func (s *Server) serveClient(c *Client) {
 }
 
 func (s *Server) closeClient(c *Client) {
-	c.conn.Close()
+	_ = c.conn.Close() // best-effort: cleanup after failure or teardown
 	s.pubsub.unsubscribeAll(c)
 	s.watches.unwatchAll(c)
 	s.removeMonitor(c)
@@ -211,7 +223,7 @@ func (c *Client) startPush() {
 			_, err := c.w.Out.Write(msg)
 			c.wmu.Unlock()
 			if err != nil {
-				c.conn.Close()
+				_ = c.conn.Close() // best-effort: cleanup after failure or teardown
 				for range ch {
 				}
 				return
@@ -235,7 +247,7 @@ func (c *Client) push(msg []byte) {
 		close(c.pushCh)
 		c.s.stats.evictedClients.Add(1)
 		c.s.log.Warn("client closed for overcoming of output buffer limits", "id", c.id, "addr", c.addr)
-		c.conn.Close()
+		_ = c.conn.Close() // best-effort: cleanup after failure or teardown
 	}
 }
 

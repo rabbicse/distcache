@@ -537,7 +537,8 @@ func (e *scriptEngine) redisCall(vm *luaVM, a []lua.Value, raise bool) lua.Value
 		vm.run.wrote.Store(true)
 	}
 	r := resp.NewReader(bytes.NewReader(w.Bytes()), len(w.Bytes())+16)
-	r.MaxBulkLen = 1 << 62
+	r.MaxBulkLen = resp.Unlimited
+	r.MaxMultiBulk = resp.Unlimited
 	val, err := r.ReadValue()
 	if err != nil {
 		return fail("ERR internal reply conversion error")

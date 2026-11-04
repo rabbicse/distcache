@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,56 +16,97 @@ const errNotHLL = "WRONGTYPE Key is not a valid HyperLogLog string value."
 
 // ---- HyperLogLog ----
 
-func (c *Ctx) getHLL(key string) (*ds.HLL, []byte, bool) {
+// errInvalidHLL is Redis's invalid_hll_err: the header is a valid HLL but
+// the sparse registers do not add up.
+const errInvalidHLL = "INVALIDOBJ Corrupted HLL object detected"
+
+// getHLLString returns the HLL string stored at key (nil if missing),
+// replying WRONGTYPE when the value is not a string with a valid HLL header,
+// like Redis's isHLLObjectOrReply.
+func (c *Ctx) getHLLString(key string) ([]byte, bool) {
 	v, e, ok := c.getStr(key)
 	if !ok {
-		return nil, nil, false
+		return nil, false
 	}
 	if e == nil {
-		return nil, nil, true
+		return nil, true
+	}
+	if !ds.IsHLL(v) {
+		c.Err(errNotHLL)
+		return nil, false
+	}
+	return v, true
+}
+
+// getHLL decodes the HLL at key (nil if missing), replying WRONGTYPE for a
+// bad header and INVALIDOBJ for corrupt sparse registers.
+func (c *Ctx) getHLL(key string) (*ds.HLL, bool) {
+	v, ok := c.getHLLString(key)
+	if !ok || v == nil {
+		return nil, ok
 	}
 	h, valid := ds.DecodeHLL(v)
 	if !valid {
-		c.Err(errNotHLL)
-		return nil, nil, false
+		c.Err(errInvalidHLL)
+		return nil, false
 	}
-	return h, v, true
+	return h, true
 }
 
 func cmdPFAdd(c *Ctx) {
 	key := c.Arg(1)
-	h, _, ok := c.getHLL(key)
+	v, ok := c.getHLLString(key)
 	if !ok {
 		return
 	}
-	created := false
-	if h == nil {
-		h = &ds.HLL{}
-		created = true
-	}
+	// Work on a copy: the stored slice may be shared with a snapshot.
+	var b []byte
 	updated := false
+	if v == nil {
+		b = ds.NewHLLSparse()
+		updated = true
+	} else {
+		b = slices.Clone(v)
+	}
 	for _, el := range c.Args[2:] {
-		if h.Add(el) {
+		var r int
+		b, r = ds.HLLAdd(b, el)
+		switch r {
+		case -1:
+			c.Err(errInvalidHLL)
+			return
+		case 1:
 			updated = true
 		}
 	}
-	if created || updated {
-		c.DB.SetValue(key, h.Encode(), true)
-		c.Dirty(1)
-		c.W.WriteInt(1)
+	if !updated {
+		c.W.WriteInt(0)
 		return
 	}
-	c.W.WriteInt(0)
+	ds.HLLInvalidateCache(b)
+	c.DB.SetValue(key, b, true)
+	c.Dirty(1)
+	c.W.WriteInt(1)
 }
 
 func cmdPFCount(c *Ctx) {
 	if len(c.Args) == 2 {
-		h, _, ok := c.getHLL(c.Arg(1))
+		v, ok := c.getHLLString(c.Arg(1))
 		if !ok {
 			return
 		}
-		if h == nil {
+		if v == nil {
 			c.W.WriteInt(0)
+			return
+		}
+		// Redis trusts a valid cached cardinality without decoding.
+		if n, cached := ds.HLLCachedCount(v); cached {
+			c.W.WriteInt(int64(n))
+			return
+		}
+		h, valid := ds.DecodeHLL(v)
+		if !valid {
+			c.Err(errInvalidHLL)
 			return
 		}
 		c.W.WriteInt(int64(h.Count()))
@@ -72,7 +114,7 @@ func cmdPFCount(c *Ctx) {
 	}
 	acc := &ds.HLL{}
 	for _, k := range c.Args[1:] {
-		h, _, ok := c.getHLL(string(k))
+		h, ok := c.getHLL(string(k))
 		if !ok {
 			return
 		}
@@ -83,18 +125,52 @@ func cmdPFCount(c *Ctx) {
 	c.W.WriteInt(int64(acc.Count()))
 }
 
+// cmdPFMerge follows Redis's pfmergeCommand: the destination stays sparse
+// (updated register by register) unless some input is dense.
 func cmdPFMerge(c *Ctx) {
 	acc := &ds.HLL{}
+	useDense := false
 	for _, k := range c.Args[1:] {
-		h, _, ok := c.getHLL(string(k))
+		v, ok := c.getHLLString(string(k))
 		if !ok {
 			return
 		}
-		if h != nil {
-			acc.Merge(h)
+		if v == nil {
+			continue
+		}
+		if ds.HLLIsDense(v) {
+			useDense = true
+		}
+		h, valid := ds.DecodeHLL(v)
+		if !valid {
+			c.Err(errInvalidHLL)
+			return
+		}
+		acc.Merge(h)
+	}
+	dst := c.Arg(1)
+	var b []byte
+	if e := c.Lookup(dst); e == nil {
+		b = ds.NewHLLSparse()
+	} else {
+		b = slices.Clone(e.Value.([]byte)) // validated as an HLL above
+	}
+	if useDense {
+		var ok bool
+		if b, ok = ds.HLLToDense(b); !ok {
+			c.Err(errInvalidHLL)
+			return
+		}
+		ds.HLLWriteDense(b, acc)
+	} else {
+		for i, r := range acc.Reg {
+			if r != 0 {
+				b, _ = ds.HLLSet(b, i, r) // b was validated, so -1 cannot occur
+			}
 		}
 	}
-	c.DB.SetValue(c.Arg(1), acc.Encode(), true)
+	ds.HLLInvalidateCache(b)
+	c.DB.SetValue(dst, b, true)
 	c.Dirty(1)
 	c.W.WriteOK()
 }
@@ -160,12 +236,10 @@ func cmdGeoAdd(c *Ctx) {
 	}
 done:
 	rest := c.Args[i:]
-	if len(rest) == 0 || len(rest)%3 != 0 {
-		c.Err("ERR syntax error. Try GEOADD key [x1] [y1] [name1] [x2] [y2] [name2] ... ")
-		return
-	}
-	if nx && xx {
-		c.Err("ERR XX and NX options at the same time are not compatible")
+	// Redis's geoaddCommand folds a bad triple count and XX+NX into one
+	// plain syntax error.
+	if len(rest) == 0 || len(rest)%3 != 0 || (nx && xx) {
+		c.SyntaxErr()
 		return
 	}
 	type item struct {

@@ -304,8 +304,8 @@ func (s *Server) rewriteAOF() error {
 		p.mu.Unlock()
 	}
 	if err != nil {
-		f.Close()
-		os.Remove(tmp)
+		_ = f.Close()      // best-effort: cleanup after failure or teardown
+		_ = os.Remove(tmp) // best-effort: cleanup after failure or teardown
 		s.stats.lastAofRewriteOK.Store(false)
 		s.log.Warn("AOF rewrite failed", "err", err)
 		return err
@@ -315,7 +315,9 @@ func (s *Server) rewriteAOF() error {
 		p.mu.Lock()
 		if p.aofFile == f {
 			p.aofFile = nil
-			f.Close()
+			if cerr := f.Close(); cerr != nil {
+				s.log.Warn("closing AOF after rewrite failed", "err", cerr)
+			}
 		}
 		p.mu.Unlock()
 	}
@@ -334,7 +336,7 @@ func (s *Server) loadAOF(path string) error {
 		}
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // best-effort: read-only file
 	cr := &posReader{r: f}
 	br := bufio.NewReaderSize(cr, 1<<16)
 	peek, _ := br.Peek(6)
@@ -354,10 +356,11 @@ func (s *Server) loadAOF(path string) error {
 	fake.name.Store("aof-loader")
 	fake.lastCmd.Store("")
 	r := resp.NewReader(br, 1<<16)
-	r.MaxBulkLen = 1 << 62
+	r.MaxBulkLen = resp.Unlimited
+	r.MaxMultiBulk = resp.Unlimited
 	cmds := 0
 	var inMulti bool
-	var lastGood int64 = cr.n - int64(br.Buffered())
+	lastGood := cr.n - int64(br.Buffered())
 	for {
 		args, err := r.ReadCommand()
 		if err == io.EOF {

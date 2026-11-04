@@ -194,17 +194,31 @@ func (c *Ctx) subscribe(kind subKind) {
 		return
 	}
 	cl.startPush()
-	direct := c.W == cl.w
-	if direct {
-		cl.wmu.Lock()
-		defer cl.wmu.Unlock()
-	}
 	subName, _ := kind.names()
 	h := c.s.pubsub
 	m := cl.subMap(kind)
 	if *m == nil {
 		*m = map[string]struct{}{}
 	}
+	direct := c.W == cl.w
+	if direct {
+		// Drain earlier pipelined replies without holding wmu, then hold
+		// wmu across hub registration and the acks. The push goroutine
+		// blocks on wmu meanwhile, so the acks precede every push and any
+		// PUBLISH after the ack is delivered (registration is complete
+		// before the ack can be read). Auto-flush is suppressed because it
+		// would re-lock wmu through W.Mu.
+		_ = c.W.Flush()
+		cl.wmu.Lock()
+		c.W.SetLockedSection(true)
+		defer func() {
+			_ = c.W.FlushLocked()
+			c.W.SetLockedSection(false)
+			cl.wmu.Unlock()
+		}()
+	}
+	// Queued path (MULTI/script): the ack is buffered in another writer, so
+	// it can trail a push. Pre-existing and minor.
 	for _, a := range c.Args[1:] {
 		name := string(a)
 		if _, ok := (*m)[name]; !ok {
@@ -222,9 +236,6 @@ func (c *Ctx) subscribe(kind subKind) {
 		} else {
 			c.W.WriteInt(int64(cl.nsubs.Load() + cl.npsubs.Load()))
 		}
-	}
-	if direct {
-		_ = c.W.Flush()
 	}
 }
 

@@ -292,22 +292,7 @@ func (s *Server) registerCommands() {
 	renamed := s.cfg.Renamed()
 	s.cmds = make(map[string]*Command, len(specs))
 	for _, sp := range specs {
-		cmd := &Command{
-			Name: sp.name, Arity: sp.arity, Flags: parseFlags(sp.flags), First: sp.first, Last: sp.last,
-			Step: sp.step, Group: sp.group, Handler: sp.h, Keys: sp.keys,
-		}
-		if cmd.Has(FlagWrite) {
-			cmd.NotifyClass = notifyClass[sp.group]
-			cmd.Event = sp.name
-		}
-		name := sp.name
-		if nn, ok := renamed[name]; ok {
-			if nn == "" {
-				continue
-			}
-			name = strings.ToLower(nn)
-		}
-		s.cmds[name] = cmd
+		s.addCommand(sp, renamed, notifyClass)
 	}
 	s.cmds["config"].Subs = []string{"get", "set", "resetstat", "rewrite", "help"}
 	s.cmds["client"].Subs = []string{"id", "getname", "setname", "setinfo", "info", "list", "kill", "pause", "unpause", "reply", "no-evict", "no-touch", "unblock", "help"}
@@ -316,6 +301,28 @@ func (s *Server) registerCommands() {
 	s.cmds["xinfo"].Subs = []string{"stream", "groups", "consumers", "help"}
 	s.cmds["script"].Subs = []string{"load", "exists", "flush", "kill", "help"}
 	s.cmds["function"].Subs = []string{"load", "list", "delete", "flush", "dump", "restore", "stats", "kill", "help"}
+}
+
+// addCommand builds a Command from sp and adds it to the command table,
+// honouring rename-command (an empty new name disables the command). It is
+// not safe for concurrent use: call it only while no client is executing.
+func (s *Server) addCommand(sp regSpec, renamed map[string]string, notifyClass map[string]int64) {
+	cmd := &Command{
+		Name: sp.name, Arity: sp.arity, Flags: parseFlags(sp.flags), First: sp.first, Last: sp.last,
+		Step: sp.step, Group: sp.group, Handler: sp.h, Keys: sp.keys,
+	}
+	if cmd.Has(FlagWrite) {
+		cmd.NotifyClass = notifyClass[sp.group]
+		cmd.Event = sp.name
+	}
+	name := sp.name
+	if nn, ok := renamed[name]; ok {
+		if nn == "" {
+			return
+		}
+		name = strings.ToLower(nn)
+	}
+	s.cmds[name] = cmd
 }
 
 var flagWire = []struct {

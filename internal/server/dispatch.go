@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -10,6 +11,9 @@ import (
 	"github.com/rabbicse/distcache/internal/resp"
 	"github.com/rabbicse/distcache/internal/storage"
 )
+
+// errInternal is the reply sent when a command handler panics.
+const errInternal = "ERR internal error"
 
 func (s *Server) lookupCommand(name []byte) *Command {
 	var buf [32]byte
@@ -234,14 +238,29 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 			s.ks.Lock(idx, write)
 			hasLocks = true
 		}
+		// waiter is registered on the first block and kept across retries so
+		// the client keeps its FIFO position on the keys.
+		var waiter *waiter
+		// Deferred so a recovered handler panic cannot leave a dead waiter
+		// at the head of a key's queue.
+		defer func() {
+			if waiter != nil {
+				s.blocker.unregister(waiter)
+			}
+		}()
 		for {
-			ctx.DB.Now = time.Now().UnixMilli()
+			ctx.DB.Now = s.Now().UnixMilli()
 			s.runHandler(ctx)
 			if !ctx.blocked {
 				break
 			}
-			// Register while still holding the locks so no wake-up is lost.
-			waiter := s.blocker.register(c, ctx.DB.Idx, ctx.blockKeys)
+			if waiter == nil {
+				// Register while still holding the locks so no wake-up is lost.
+				waiter = s.blocker.register(c, ctx.DB.Idx, ctx.blockKeys)
+			} else {
+				// Woken but still blocked: let the next waiter try.
+				s.blocker.passOn(waiter)
+			}
 			s.flushUnit(ctx)
 			if hasLocks {
 				if lockAll {
@@ -251,7 +270,6 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 				}
 			}
 			outcome := s.waitBlocked(c, waiter, ctx)
-			s.blocker.unregister(waiter)
 			if outcome != blockWoken {
 				if outcome == blockUnblockErr {
 					w.WriteError("UNBLOCKED client unblocked via CLIENT UNBLOCK")
@@ -302,7 +320,7 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 }
 
 func (s *Server) newDB(c *Client, write bool) *storage.DB {
-	db := &storage.DB{KS: s.ks, Write: write, Now: time.Now().UnixMilli()}
+	db := &storage.DB{KS: s.ks, Write: write, Now: s.Now().UnixMilli()}
 	if c != nil {
 		db.Idx = c.db
 		db.NoTouch = c.noTouch
@@ -325,7 +343,10 @@ func (s *Server) runHandler(ctx *Ctx) {
 			ctx.DB.Preserve(k)
 		}
 	}
-	cmd.Handler(ctx)
+	if !s.invokeHandler(ctx) {
+		s.afterPanic(ctx)
+		return
+	}
 	if ctx.blocked {
 		return
 	}
@@ -360,6 +381,60 @@ func (s *Server) runHandler(ctx *Ctx) {
 	if write {
 		s.stats.totalWritesProc.Add(1)
 	}
+}
+
+// invokeHandler runs the command handler and reports whether it returned
+// normally. A panic is logged with its stack, counted, and answered with
+// errInternal instead of crashing the process. Recovery happens here, below
+// call, so call's lock release, blocking loop and snapshot barrier run
+// exactly as for a normal return; EXEC and scripts (locked=true) likewise
+// keep ownership of their locks.
+//
+// Any partial reply the handler produced is discarded first so the pipelined
+// stream stays in sync. If part of it was already flushed to the socket it
+// cannot be retracted; then nothing more is written (an extra reply would
+// desync the client) and the connection is closed after replying.
+func (s *Server) invokeHandler(ctx *Ctx) (ok bool) {
+	mark, flushes := ctx.W.Len(), ctx.W.Flushes()
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		ok = false
+		s.log.Error("handler panic", "cmd", ctx.Cmd.Name, "err", r, "stack", string(debug.Stack()))
+		if ctx.dirty > 0 {
+			s.log.Warn("possible AOF/replica divergence", "cmd", ctx.Cmd.Name, "keys", ctx.keys)
+		}
+		s.stats.unexpectedErrors.Add(1)
+		ctx.errored = true
+		ctx.blocked = false
+		if ctx.W.Flushes() != flushes {
+			if ctx.cl != nil {
+				ctx.cl.closeAfterReply = true
+			}
+			return
+		}
+		ctx.W.Truncate(mark)
+		ctx.W.WriteError(errInternal)
+	}()
+	ctx.Cmd.Handler(ctx)
+	return true
+}
+
+// afterPanic does the minimal post-processing for a handler that panicked.
+// The write may be half applied, so it is deliberately NOT propagated to
+// AOF/replicas (and no keyspace events fire): replaying a partial effect, or
+// a command that fails deterministically, would poison the log and could
+// crash every replica. Watchers are still invalidated if anything changed,
+// since the keys may have been modified in memory.
+func (s *Server) afterPanic(ctx *Ctx) {
+	ctx.prop = nil
+	ctx.propSet = false
+	if ctx.dirty > 0 && len(ctx.keys) > 0 {
+		s.watches.touch(ctx.DB.Idx, ctx.keys)
+	}
+	ctx.dirty = 0
 }
 
 func (u *execUnit) add(db int, args [][]byte) {

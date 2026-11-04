@@ -24,7 +24,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	defer closer.Close()
+	defer func() { _ = closer.Close() }() // best-effort: read-only or teardown
 	srv := server.New(cfg, log)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

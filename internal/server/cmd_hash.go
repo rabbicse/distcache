@@ -4,7 +4,6 @@ import (
 	"math"
 	"math/rand/v2"
 	"strings"
-	"time"
 
 	"github.com/rabbicse/distcache/internal/ds"
 	"github.com/rabbicse/distcache/internal/resp"
@@ -497,7 +496,7 @@ func hexpireGeneric(c *Ctx, unitSec, absolute bool) {
 		when *= 1000
 	}
 	if !absolute {
-		when += time.Now().UnixMilli()
+		when += c.NowMs()
 	}
 	if when > hfeMaxAbsTime {
 		c.Err("ERR invalid expire time in '" + c.Cmd.Name + "' command")
@@ -515,7 +514,7 @@ func hexpireGeneric(c *Ctx, unitSec, absolute bool) {
 		return
 	}
 	var changed int64
-	now := time.Now().UnixMilli()
+	now := c.NowMs()
 	for _, f := range fields {
 		cur, exists := h.TTL(f, c.DB.Now)
 		if !exists {
@@ -564,7 +563,7 @@ func httlGeneric(c *Ctx, ms, absolute bool) {
 		return
 	}
 	c.W.WriteArrayLen(len(fields))
-	now := time.Now().UnixMilli()
+	now := c.NowMs()
 	for _, f := range fields {
 		if h == nil {
 			c.W.WriteInt(-2)

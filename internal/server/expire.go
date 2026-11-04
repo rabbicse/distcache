@@ -39,7 +39,7 @@ func (s *Server) activeExpireCycle(cursor int) int {
 					s.ks.UnlockShard(i, true)
 					break
 				}
-				sampled, expired := s.ks.ExpireShard(i, db, 20, time.Now().UnixMilli(), hook)
+				sampled, expired := s.ks.ExpireShard(i, db, 20, s.Now().UnixMilli(), hook)
 				s.ks.UnlockShard(i, true)
 				if sampled == 0 || expired*4 <= sampled || time.Since(start) >= budget {
 					break
