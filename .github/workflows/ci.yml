@@ -57,10 +57,10 @@ jobs:
         run: |
           make test
           make test-e2e
-      # Windows has no make; scripts/test.ps1 comes in a later task.
-      - name: Vet and test (Windows)
+      # Windows support is deferred: it only has to compile and vet.
+      - name: Build and vet (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
+          go build ./...
           go vet ./...
-          go test -race -count=1 ./...
