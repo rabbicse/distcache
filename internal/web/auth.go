@@ -38,6 +38,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rabbicse/distcache/internal/server"
@@ -85,9 +86,10 @@ type session struct {
 	mu sync.Mutex      // serialises every db.Exec; server.Session is single-goroutine
 	db *server.Session // nil when the console has no server (tests)
 
-	history []string // console history, newest first; guarded by mu
-	inMulti bool     // an open MULTI on db; guarded by mu
-	queued  int      // commands queued in that MULTI; guarded by mu
+	history []string     // console history, newest first; guarded by mu
+	streams atomic.Int32 // open dashboard SSE streams on this session
+	inMulti bool         // an open MULTI on db; guarded by mu
+	queued  int          // commands queued in that MULTI; guarded by mu
 }
 
 // lockout tracks login failures from one client IP.

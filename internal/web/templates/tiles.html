@@ -1,15 +1,15 @@
 {{define "tiles"}}<div class="tiles">
-  <section class="tile"><h2>ops/s</h2><p class="big mono">{{.OpsPerSec}}</p></section>
-  <section class="tile"><h2>latency</h2><p class="mono"><span class="muted">p50</span> {{.P50}}</p><p class="mono"><span class="muted">p99</span> {{.P99}}</p></section>
-  <section class="tile"><h2>memory</h2><p class="big mono">{{.MemUsed}}</p>
+  <section class="tile"><h2>ops/s</h2><p class="big mono">{{template "stat" .OpsPerSec}}</p></section>
+  <section class="tile"><h2>latency</h2><p class="mono"><span class="muted">p50</span> {{template "stat" .P50}}</p><p class="mono"><span class="muted">p99</span> {{template "stat" .P99}}</p></section>
+  <section class="tile"><h2>memory</h2><p class="big mono">{{template "stat" .MemUsed}}</p>
     <p class="muted">of {{.MemMax}}{{if .MemPct}} ({{.MemPct}}){{end}}</p>
-    {{if .MemPct}}<svg class="meter" viewBox="0 0 {{.MeterW}} 6" role="img" aria-label="Memory used {{.MemPct}}"><rect class="meter-bg" width="{{.MeterW}}" height="6" rx="3"/><rect class="meter-fill" width="{{.MeterFill}}" height="6" rx="3"/></svg>{{end}}
+    {{if .MemPct}}<svg class="meter" viewBox="0 0 {{.MeterW}} 6" role="meter" aria-valuenow="{{.MemPctInt}}" aria-valuemin="0" aria-valuemax="100" aria-label="Memory used, percent of maxmemory"><rect class="meter-bg" width="{{.MeterW}}" height="6" rx="3"/><rect class="meter-fill" width="{{.MeterFill}}" height="6" rx="3"/></svg>{{end}}
   </section>
-  <section class="tile"><h2>clients</h2><p class="big mono">{{.Clients}}</p></section>
-  <section class="tile"><h2>hit rate</h2><p class="big mono">{{.HitRate}}</p></section>
-  <section class="tile"><h2>evictions</h2><p class="big mono">{{.Evicted}}</p></section>
-  <section class="tile"><h2>expired</h2><p class="big mono">{{.Expired}}</p></section>
-  <section class="tile"><h2>role</h2><p class="big mono">{{.Role}}</p></section>
+  <section class="tile"><h2>clients</h2><p class="big mono">{{template "stat" .Clients}}</p></section>
+  <section class="tile"><h2>hit rate</h2><p class="big mono">{{template "stat" .HitRate}}</p></section>
+  <section class="tile"><h2>evictions</h2><p class="big mono">{{template "stat" .Evicted}}</p></section>
+  <section class="tile"><h2>expired</h2><p class="big mono">{{template "stat" .Expired}}</p></section>
+  <section class="tile"><h2>role</h2><p class="big mono">{{template "stat" .Role}}</p></section>
 </div>
 <div class="sparks">{{range .Sparks}}
   <figure class="spark"><figcaption><span>{{.Label}}</span><span class="muted mono">peak {{.Max}}</span></figcaption>
@@ -17,5 +17,10 @@
   </figure>{{end}}
 </div>
 <section class="heat"><h2>Shard activity <span class="muted">ops in the last second; outline = waited on lock</span></h2>
-  <svg viewBox="0 0 {{.Heat.W}} {{.Heat.H}}" role="img" aria-label="Per-shard operations heatmap">{{range .Heat.Cells}}<rect class="shard" x="{{.X}}" y="{{.Y}}" width="{{$.Heat.Size}}" height="{{$.Heat.Size}}" rx="2" fill="#22d3ee" fill-opacity="{{.Opacity}}"{{if .Stroke}} stroke="{{.Stroke}}" stroke-width="1.5"{{end}}><title>{{.Title}}</title></rect>{{end}}</svg>
+  <svg viewBox="0 0 {{.Heat.W}} {{.Heat.H}}" role="img" aria-label="Per-shard operations heatmap">{{range .Heat.Cells}}<rect class="shard" x="{{.X}}" y="{{.Y}}" width="{{$.Heat.Size}}" height="{{$.Heat.Size}}" rx="2" fill-opacity="{{.Opacity}}"{{if .Waited}} data-wait="1"{{end}}><title>{{.Title}}</title></rect>{{end}}</svg>
+  <table class="sr-only"><caption>Busiest shards by operations in the last second</caption>
+    <thead><tr><th scope="col">Shard</th><th scope="col">Ops</th><th scope="col">Keys</th><th scope="col">Waited on lock</th></tr></thead>
+    <tbody>{{range .Heat.Top}}<tr><td>{{.Shard}}</td><td>{{.Ops}}</td><td>{{.Keys}}</td><td>{{if .Waited}}yes{{else}}no{{end}}</td></tr>{{end}}</tbody></table>
 </section>{{end}}
+
+{{define "stat"}}{{if .Dash}}<span role="img" aria-label="not available">—</span>{{else}}{{.}}{{end}}{{end}}

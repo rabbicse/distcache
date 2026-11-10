@@ -3,6 +3,8 @@ package web
 import (
 	"bufio"
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -205,5 +207,149 @@ func TestDashboard_SSEEmitsTiles(t *testing.T) {
 	}
 	if got := runtime.NumGoroutine(); got > base {
 		t.Fatalf("got %d goroutines, want at most %d after disconnect", got, base)
+	}
+}
+
+// openStream connects to /events/stats with the env's session.
+func openStream(t *testing.T, base string, e *consoleEnv) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, base+"/events/stats", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(e.ck)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestDashboard_StreamCapPerSession(t *testing.T) {
+	e := newConsoleEnv(t)
+	ts := httptest.NewServer(e.c.Handler())
+	t.Cleanup(ts.Close)
+	for i := range maxStreamsPerSession {
+		if resp := openStream(t, ts.URL, e); resp.StatusCode != http.StatusOK {
+			t.Fatalf("stream %d: got status %d, want 200", i, resp.StatusCode)
+		}
+	}
+	if resp := openStream(t, ts.URL, e); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("got status %d, want 429", resp.StatusCode)
+	}
+}
+
+func TestDashboard_StreamKeepalive(t *testing.T) {
+	e := newConsoleEnv(t)
+	e.c.keepalive = 20 * time.Millisecond
+	ts := httptest.NewServer(e.c.Handler())
+	t.Cleanup(ts.Close)
+	sc := bufio.NewScanner(openStream(t, ts.URL, e).Body)
+	for sc.Scan() {
+		if sc.Text() == ": keepalive" {
+			return
+		}
+	}
+	t.Fatalf("no keepalive comment: %v", sc.Err())
+}
+
+func TestDashboard_StreamEndsWithSession(t *testing.T) {
+	e := newConsoleEnv(t)
+	e.c.keepalive = 20 * time.Millisecond
+	ts := httptest.NewServer(e.c.Handler())
+	t.Cleanup(ts.Close)
+	resp := openStream(t, ts.URL, e)
+	e.c.authMu.Lock()
+	delete(e.c.sessions, e.s.id)
+	e.c.authMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		_, _ = bufio.NewReader(resp.Body).WriteTo(discard{})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stream still open after its session was removed")
+	}
+}
+
+type discard struct{}
+
+func (discard) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestDashboard_StreamWriteDeadline(t *testing.T) {
+	e := newConsoleEnv(t)
+	e.c.writeTimeout = 100 * time.Millisecond
+	ts := httptest.NewServer(e.c.Handler())
+	t.Cleanup(ts.Close)
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetReadBuffer(1024) // keep the stalled receiver's window small
+	}
+	fmt.Fprintf(conn, "GET /events/stats HTTP/1.1\r\nHost: x\r\nCookie: %s=%s\r\n\r\n", e.ck.Name, e.ck.Value)
+	waitFor(t, "stream to open", func() bool { return e.s.streams.Load() == 1 })
+	// Never read; keep producing samples until the stalled write times out.
+	snap := e.srv.Stats()
+	waitFor(t, "handler to give up on the stalled client", func() bool {
+		e.c.sampler.add(snap, latency{})
+		return e.s.streams.Load() == 0
+	})
+}
+
+func TestDashboard_AuditsRejectedMemory(t *testing.T) {
+	e := newConsoleEnv(t)
+	e.post(t, "/settings/memory", url.Values{"maxmemory": {"4zb"}, "policy": {"allkeys-lru"}})
+	if out := e.lb.String(); !strings.Contains(out, "setting=maxmemory") || !strings.Contains(out, "result=error") {
+		t.Fatalf("got %q, want an audit line with result=error", out)
+	}
+}
+
+func TestDashboard_Accessibility(t *testing.T) {
+	e := newConsoleEnv(t)
+	body := authedGet(e.c, "/", e.ck, nil).Body.String()
+	if !strings.Contains(body, `aria-label="not available"`) {
+		t.Error("dash lacks accessible text")
+	}
+	if !strings.Contains(body, `class="sr-only"`) {
+		t.Error("heatmap lacks a text table")
+	}
+	e.exec(t, "CONFIG SET maxmemory 1gb")
+	e.c.sampler.add(e.srv.Stats(), latency{})
+	body = authedGet(e.c, "/", e.ck, nil).Body.String()
+	for _, want := range []string{`role="meter"`, `aria-valuenow=`, `aria-valuemax="100"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("meter lacks %s", want)
+		}
+	}
+	if strings.Contains(body, `fill="#`) {
+		t.Error("heatmap cells hardcode a fill colour")
+	}
+}
+
+func TestDashboard_HeatTopShards(t *testing.T) {
+	cur := server.StatsSnapshot{Shards: make([]server.ShardStat, 32)}
+	prev := server.StatsSnapshot{Shards: make([]server.ShardStat, 32)}
+	cur.Shards[7].Ops = 50
+	cur.Shards[3].Ops = 90
+	h := buildHeat(cur, &prev)
+	if len(h.Top) != topShards || h.Top[0].Shard != 3 || h.Top[1].Shard != 7 {
+		t.Fatalf("got top %+v, want shards 3 then 7, %d rows", h.Top[:2], topShards)
 	}
 }

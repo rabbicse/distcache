@@ -93,6 +93,9 @@ type Console struct {
 	stopSampler func()
 	// sampleTick supplies the sampling ticks; tests inject their own.
 	sampleTick func() (<-chan time.Time, func())
+	// keepalive and writeTimeout tune SSE streams; tests shorten them.
+	keepalive    time.Duration
+	writeTimeout time.Duration
 }
 
 // page is the data passed to layout.html for every page.
@@ -139,7 +142,8 @@ func New(o Options) (*Console, error) {
 		srv: o.Server, cfg: o.Config, log: log, tmpl: tmpl, mux: http.NewServeMux(),
 		now: time.Now, trusted: trusted,
 		sessions: make(map[string]*session), lockouts: make(map[netip.Prefix]*lockout),
-		newTicker:  defaultTicker,
+		newTicker: defaultTicker,
+		keepalive: keepaliveEvery, writeTimeout: streamWriteTimeout,
 		sampleTick: func() (<-chan time.Time, func()) { return defaultTicker(sampleEvery) },
 	}
 

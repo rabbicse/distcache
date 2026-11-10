@@ -6,6 +6,7 @@ package web
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"math"
 	"net/http"
@@ -26,6 +27,14 @@ const (
 	// keepaliveEvery is the SSE comment interval that keeps proxies from
 	// closing an idle stream.
 	keepaliveEvery = 15 * time.Second
+	// streamWriteTimeout bounds each SSE write+flush so a client that stops
+	// reading cannot pin its handler goroutine and session.
+	streamWriteTimeout = 10 * time.Second
+	// maxStreamsPerSession caps open dashboard streams per browser session.
+	maxStreamsPerSession = 4
+	// idleOpacity is the faintest heatmap cell; it keeps 3:1 contrast with
+	// the card surface so idle shards stay visible.
+	idleOpacity = 0.25
 
 	sparkW, sparkH = 240, 36 // sparkline viewBox
 	heatCell       = 14      // heatmap cell edge, in viewBox units
@@ -33,6 +42,7 @@ const (
 	meterW         = 160 // memory meter viewBox width
 	noValue        = "—"
 	maxSizeArg     = 32 // longest accepted maxmemory string
+	topShards      = 10 // rows in the screen-reader shard table
 )
 
 // evictionPolicies are the values CONFIG SET maxmemory-policy accepts; the
@@ -52,7 +62,9 @@ type sampler struct {
 	mu      sync.Mutex // guards every field below
 	ring    []server.StatsSnapshot
 	lat     latency
-	changed chan struct{} // closed and replaced on every add
+	changed chan struct{}                                // closed and replaced on every add
+	frame   []byte                                       // rendered SSE event for the newest sample; nil without render
+	render  func([]server.StatsSnapshot, latency) []byte // set before the goroutine starts; may be nil
 	stopped bool
 	stop    chan struct{} // closed by shutdown; unblocks waiters
 }
@@ -71,6 +83,10 @@ func (s *sampler) add(snap server.StatsSnapshot, lat latency) {
 	}
 	s.ring = append(s.ring, snap)
 	s.lat = lat
+	if s.render != nil {
+		// Rendered once per sample here, then fanned out to every stream.
+		s.frame = s.render(s.ring, lat)
+	}
 	close(s.changed)
 	s.changed = make(chan struct{})
 }
@@ -95,6 +111,13 @@ func (s *sampler) next() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.changed
+}
+
+// currentFrame returns the SSE event bytes for the newest sample, or nil.
+func (s *sampler) currentFrame() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.frame
 }
 
 // shutdown releases waiters and SSE handlers; it is idempotent.
@@ -128,6 +151,7 @@ func (c *Console) startSampler() {
 		return
 	}
 	s := newSampler()
+	s.render = c.renderFrame
 	db := c.srv.NewSession() // dedicated: INFO must not contend with browser sessions
 	ticks, stopTick := c.sampleTick()
 	done, finished := make(chan struct{}), make(chan struct{})
@@ -229,22 +253,38 @@ type sparkView struct {
 type cell struct {
 	X, Y    int
 	Opacity string
-	Stroke  string // empty, or the outline colour when the shard waited on its lock
+	Waited  bool // the shard waited on its lock in the last interval
 	Title   string
+}
+
+// topShard is one row of the screen-reader table.
+type topShard struct {
+	Shard, Keys int
+	Ops         int64
+	Waited      bool
 }
 
 type heatView struct {
 	W, H, Size int
 	Cells      []cell
+	Top        []topShard // busiest shards first, for the text alternative
 }
+
+// stat is a tile value; templates mark the "not available" dash for screen
+// readers through Dash.
+type stat string
+
+// Dash reports whether the value is the not-available placeholder.
+func (v stat) Dash() bool { return v == noValue }
 
 // tilesView is the data for tiles.html.
 type tilesView struct {
-	OpsPerSec, P50, P99                string
-	MemUsed, MemMax, MemPct            string
-	MeterW, MeterFill                  int
-	Clients, HitRate, Evicted, Expired string
-	Role                               string
+	OpsPerSec, P50, P99                stat
+	MemUsed                            stat
+	MemMax, MemPct                     string
+	MeterW, MeterFill, MemPctInt       int
+	Clients, HitRate, Evicted, Expired stat
+	Role                               stat
 	Sparks                             []sparkView
 	Heat                               heatView
 }
@@ -252,27 +292,28 @@ type tilesView struct {
 // buildTiles derives the tiles from the sampler history; with no samples it
 // returns placeholders.
 func buildTiles(samples []server.StatsSnapshot, lat latency) tilesView {
-	t := tilesView{OpsPerSec: noValue, P50: orDash(lat.P50), P99: orDash(lat.P99),
+	t := tilesView{OpsPerSec: noValue, P50: stat(orDash(lat.P50)), P99: stat(orDash(lat.P99)),
 		MemUsed: noValue, MemMax: noValue, Clients: noValue, HitRate: noValue,
 		Evicted: noValue, Expired: noValue, Role: noValue, MeterW: meterW}
 	if len(samples) == 0 {
 		return t
 	}
 	cur := samples[len(samples)-1]
-	t.OpsPerSec = strconv.FormatInt(cur.OpsPerSec, 10)
-	t.MemUsed = humanBytes(cur.UsedMemory)
+	t.OpsPerSec = stat(strconv.FormatInt(cur.OpsPerSec, 10))
+	t.MemUsed = stat(humanBytes(cur.UsedMemory))
 	t.MemMax = "unlimited"
 	if cur.MaxMemory > 0 {
 		t.MemMax = humanBytes(cur.MaxMemory)
 		frac := math.Min(1, float64(cur.UsedMemory)/float64(cur.MaxMemory))
 		t.MemPct = fmt.Sprintf("%.0f%%", 100*frac)
 		t.MeterFill = int(frac * meterW)
+		t.MemPctInt = int(math.Round(100 * frac))
 	}
-	t.Clients = strconv.FormatInt(cur.Clients, 10)
-	t.HitRate = hitRate(cur.Hits, cur.Misses)
-	t.Evicted = strconv.FormatInt(cur.Evicted, 10)
-	t.Expired = strconv.FormatInt(cur.Expired, 10)
-	t.Role = cur.Role
+	t.Clients = stat(strconv.FormatInt(cur.Clients, 10))
+	t.HitRate = stat(hitRate(cur.Hits, cur.Misses))
+	t.Evicted = stat(strconv.FormatInt(cur.Evicted, 10))
+	t.Expired = stat(strconv.FormatInt(cur.Expired, 10))
+	t.Role = stat(cur.Role)
 	t.Sparks = []sparkView{
 		spark("ops/s", samples, func(s server.StatsSnapshot) float64 { return float64(s.OpsPerSec) }, func(v float64) string { return strconv.FormatInt(int64(v), 10) }),
 		spark("memory", samples, func(s server.StatsSnapshot) float64 { return float64(s.UsedMemory) }, func(v float64) string { return humanBytes(int64(v)) }),
@@ -336,18 +377,21 @@ func buildHeat(cur server.StatsSnapshot, prev *server.StatsSnapshot) heatView {
 		peak = max(peak, ops[i])
 	}
 	for i := range n {
-		op := 0.08 // idle shards stay faintly visible
+		op := idleOpacity // idle shards stay visible
 		if peak > 0 {
-			op += 0.92 * float64(ops[i]) / float64(peak)
+			op += (1 - idleOpacity) * float64(ops[i]) / float64(peak)
 		}
 		c := cell{X: i % cols * step, Y: i / cols * step, Opacity: strconv.FormatFloat(op, 'f', 2, 64),
 			Title: fmt.Sprintf("Shard %d: %d ops, %d keys", i, ops[i], cur.Shards[i].Keys)}
 		if waited[i] {
-			c.Stroke = "#fcd34d"
+			c.Waited = true
 			c.Title += ", waited on lock"
 		}
 		h.Cells = append(h.Cells, c)
+		h.Top = append(h.Top, topShard{Shard: i, Keys: int(cur.Shards[i].Keys), Ops: ops[i], Waited: waited[i]})
 	}
+	slices.SortStableFunc(h.Top, func(a, b topShard) int { return cmp.Compare(b.Ops, a.Ops) })
+	h.Top = h.Top[:min(len(h.Top), topShards)]
 	return h
 }
 
@@ -439,21 +483,38 @@ func (c *Console) handleMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyMemory runs both CONFIG SET commands, maxmemory first so an invalid
-// size leaves the policy untouched. It returns an error message or "".
+// size leaves the policy untouched. It returns an error message or "". Every
+// attempt, rejected or not, is audited.
 func (c *Console) applyMemory(r *http.Request, s *session, size, policy string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, kv := range [][2]string{{"maxmemory", size}, {"maxmemory-policy", policy}} {
-		v, err := s.db.Exec("CONFIG", "SET", kv[0], kv[1])
-		if err != nil {
-			c.log.Warn("web setting", "setting", kv[0], "err", err)
-			return "internal error applying the setting"
+	for i, kv := range [][2]string{{"maxmemory", size}, {"maxmemory-policy", policy}} {
+		msg := c.setConfig(r, s, kv[0], kv[1])
+		if msg == "" {
+			continue
 		}
-		if view := viewOf(v); view.Kind == "error" {
-			return view.Text
+		if i > 0 {
+			return fmt.Sprintf("maxmemory set to %s; policy not changed: %s", size, msg)
 		}
-		c.log.Info("web setting", "user", s.user, "ip", clientIP(r, c.trusted).String(), "setting", kv[0], "value", kv[1])
+		return msg
 	}
+	return ""
+}
+
+// setConfig runs one CONFIG SET and audits the outcome. The caller holds the
+// session lock.
+func (c *Console) setConfig(r *http.Request, s *session, name, value string) string {
+	ip := clientIP(r, c.trusted).String()
+	v, err := s.db.Exec("CONFIG", "SET", name, value)
+	if err != nil {
+		c.log.Warn("web setting", "user", s.user, "ip", ip, "setting", name, "value", value, "result", "error", "err", err)
+		return "internal error applying the setting"
+	}
+	if view := viewOf(v); view.Kind == "error" {
+		c.log.Info("web setting", "user", s.user, "ip", ip, "setting", name, "value", value, "result", "error")
+		return view.Text
+	}
+	c.log.Info("web setting", "user", s.user, "ip", ip, "setting", name, "value", value, "result", "ok")
 	return ""
 }
 
@@ -463,28 +524,74 @@ func (c *Console) writeMemory(w http.ResponseWriter, s *session, errMsg string) 
 	c.renderFragment(w, "memory", v)
 }
 
+// renderFrame renders the SSE tiles event for samples; it runs in the
+// sampler once per sample. It returns nil if the template fails.
+func (c *Console) renderFrame(samples []server.StatsSnapshot, lat latency) []byte {
+	var buf bytes.Buffer
+	if err := c.tmpl.ExecuteTemplate(&buf, "tiles", buildTiles(samples, lat)); err != nil {
+		c.log.Error("render tiles", "err", err)
+		return nil
+	}
+	var out bytes.Buffer
+	out.WriteString("event: tiles\n")
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		out.WriteString("data: " + line + "\n")
+	}
+	out.WriteString("\n")
+	return out.Bytes()
+}
+
+// sessionLive reports whether s is still the registered, unexpired session.
+// Unlike sessionByID it does not refresh the idle timer, so an open stream
+// does not keep a session alive.
+func (c *Console) sessionLive(s *session) bool {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	return c.sessions[s.id] == s && !c.expired(s, c.now())
+}
+
+// streamWrite writes b and flushes under a write deadline, then clears the
+// deadline. It reports whether the client is still reachable.
+func (c *Console) streamWrite(w http.ResponseWriter, rc *http.ResponseController, b []byte) bool {
+	// Unsupported deadlines (some test recorders) are not fatal.
+	_ = rc.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+	_, err := w.Write(b)
+	if err == nil {
+		err = rc.Flush()
+	}
+	_ = rc.SetWriteDeadline(time.Time{})
+	return err == nil
+}
+
 // handleStatsStream is the SSE endpoint: one "tiles" event per sample, a
-// keepalive comment while idle, and a return when the client leaves or the
-// sampler stops.
+// keepalive comment while idle, and a return when the client leaves, its
+// session ends or the sampler stops. Streams are capped per session.
 func (c *Console) handleStatsStream(w http.ResponseWriter, r *http.Request) {
-	rc := http.NewResponseController(w)
+	s := sessionOf(r)
 	if c.sampler == nil {
 		http.Error(w, "statistics unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	if s.streams.Add(1) > maxStreamsPerSession {
+		s.streams.Add(-1)
+		http.Error(w, "too many open dashboards for this session", http.StatusTooManyRequests)
+		return
+	}
+	defer s.streams.Add(-1)
+	rc := http.NewResponseController(w)
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	if err := rc.Flush(); err != nil {
+	if !c.streamWrite(w, rc, []byte(": connected\n\n")) {
 		return
 	}
-	keepalive := time.NewTicker(keepaliveEvery)
+	keepalive := time.NewTicker(c.keepalive)
 	defer keepalive.Stop()
 	wake := c.sampler.next()
 	for {
-		if len(c.sampler.last(1)) > 0 && !c.sendTiles(w, rc) {
+		if f := c.sampler.currentFrame(); f != nil && !c.streamWrite(w, rc, f) {
 			return
 		}
 		for woke := false; !woke; {
@@ -494,31 +601,15 @@ func (c *Console) handleStatsStream(w http.ResponseWriter, r *http.Request) {
 			case <-c.sampler.stop:
 				return
 			case <-keepalive.C:
-				if _, err := w.Write([]byte(": keepalive\n\n")); err != nil || rc.Flush() != nil {
+				if !c.sessionLive(s) || !c.streamWrite(w, rc, []byte(": keepalive\n\n")) {
 					return
 				}
 			case <-wake:
+				if !c.sessionLive(s) {
+					return
+				}
 				wake, woke = c.sampler.next(), true
 			}
 		}
 	}
-}
-
-// sendTiles writes one tiles event and reports whether the stream is alive.
-func (c *Console) sendTiles(w http.ResponseWriter, rc *http.ResponseController) bool {
-	var buf bytes.Buffer
-	if err := c.tmpl.ExecuteTemplate(&buf, "tiles", c.currentTiles()); err != nil {
-		c.log.Error("render tiles", "err", err)
-		return false
-	}
-	var out bytes.Buffer
-	out.WriteString("event: tiles\n")
-	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
-		out.WriteString("data: " + line + "\n")
-	}
-	out.WriteString("\n")
-	if _, err := w.Write(out.Bytes()); err != nil {
-		return false
-	}
-	return rc.Flush() == nil
 }
