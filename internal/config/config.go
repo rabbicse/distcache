@@ -82,16 +82,16 @@ type Config struct {
 	ProtoMaxBulkLen   atomic.Int64
 	// LuaTimeLimit is the legacy alias of busy-reply-threshold: it points at
 	// BusyReplyThreshold, so both names read and write one value.
-	LuaTimeLimit        *atomic.Int64
-	LFULogFactor        atomic.Int64
-	LFUDecayTime        atomic.Int64
-	ActiveExpire        atomic.Bool
-	HashMaxEntries      atomic.Int64
-	HashMaxValue        atomic.Int64
-	SetMaxIntset        atomic.Int64
+	LuaTimeLimit   *atomic.Int64
+	LFULogFactor   atomic.Int64
+	LFUDecayTime   atomic.Int64
+	ActiveExpire   atomic.Bool
+	HashMaxEntries atomic.Int64
+	HashMaxValue   atomic.Int64
+	SetMaxIntset   atomic.Int64
 	// HLLSparseMaxBytes is hll-sparse-max-bytes: the size past which a
 	// sparse HyperLogLog is promoted to dense.
-	HLLSparseMaxBytes atomic.Int64
+	HLLSparseMaxBytes   atomic.Int64
 	SetMaxEntries       atomic.Int64
 	SetMaxValue         atomic.Int64
 	ZSetMaxEntries      atomic.Int64
