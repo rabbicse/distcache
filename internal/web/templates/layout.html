@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{{if .CSRF}}<meta name="csrf" content="{{.CSRF}}">
+{{end}}<meta name="htmx-config" content='{"allowEval":false,"includeIndicatorStyles":false}'>
+<title>{{.Title}} - DistCache</title>
+<link rel="icon" href="/static/logo-mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/htmx-ext-sse.js" defer></script>
+{{if eq .Active "console"}}<script src="/static/console.js" defer></script>
+{{end}}</head>
+<body{{if .HXHeaders}} hx-headers="{{.HXHeaders}}"{{end}}>
+<header class="topbar">
+  <a class="brand" href="/"><img src="/static/logo-mark.svg" alt="" width="28" height="28"><span>DistCache</span></a>
+  <nav aria-label="Main">
+    <a href="/"{{if eq .Active "dashboard"}} aria-current="page"{{end}}>Dashboard</a>
+    <a href="/keys"{{if eq .Active "keys"}} aria-current="page"{{end}}>Keys</a>
+    <a href="/console"{{if eq .Active "console"}} aria-current="page"{{end}}>Console</a>
+    <a href="/pubsub"{{if eq .Active "pubsub"}} aria-current="page"{{end}}>Pub/Sub</a>
+    <form class="nav-form" method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Logout</button></form>
+  </nav>
+</header>
+{{if .Insecure}}<div class="insecure-banner" role="alert" id="insecure-banner">Insecure connection: this console is served over plain HTTP.</div>{{end}}
+<main>
+  <h1>{{.Title}}</h1>
+  {{if eq .Active "console"}}{{template "console" .}}{{else if eq .Active "dashboard"}}{{template "dashboard" .}}{{else}}<p class="muted">This page is coming soon.</p>{{end}}
+</main>
+</body>
+</html>

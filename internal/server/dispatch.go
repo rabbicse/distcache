@@ -243,6 +243,11 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 		} else if len(keys) > 0 {
 			idx = s.keyspace.ShardSet(keys, shardBuf[:0])
 			s.keyspace.Lock(idx, lockWrite)
+			// Counted once per command, not per blocking retry. LockAll
+			// commands are deliberately not counted per shard: 256 atomic
+			// adds per FLUSHALL/EVAL would cost more than the stat is worth,
+			// and they already show up in the global command counter.
+			s.keyspace.CountOps(idx)
 			hasLocks = true
 		}
 		// waiter is registered on the first block and kept across retries so

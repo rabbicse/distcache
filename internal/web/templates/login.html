@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in - DistCache</title>
+<link rel="icon" href="/static/logo-mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><img src="/static/logo-mark.svg" alt="" width="28" height="28"><span>DistCache</span></a>
+</header>
+{{if .Insecure}}<div class="insecure-banner" role="alert" id="insecure-banner">Insecure connection: this console is served over plain HTTP.</div>{{end}}
+<main class="center">
+  <h1>Sign in</h1>
+  {{if .Message}}<p class="form-error" role="alert">{{.Message}}</p>{{end}}
+  <form class="card" method="post" action="/login">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label>Username <input name="username" value="default" autocomplete="username"></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required autofocus></label>
+    <button type="submit">Sign in</button>
+  </form>
+</main>
+</body>
+</html>

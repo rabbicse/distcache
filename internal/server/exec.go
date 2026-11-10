@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -194,20 +193,11 @@ func secondArg(args [][]byte) ([]byte, bool) {
 	return args[1], true
 }
 
-// blockOption: XREAD and XREADGROUP take "BLOCK ms" before the STREAMS keyword.
+// blockOption: XREAD and XREADGROUP take "BLOCK ms" among their options; the
+// last one wins, exactly as in the handler (see scanXReadOptions).
 func blockOption(args [][]byte) ([]byte, bool) {
-	for i := 1; i < len(args); i++ {
-		switch strings.ToUpper(string(args[i])) {
-		case "STREAMS":
-			return nil, false
-		case "BLOCK":
-			if i+1 < len(args) {
-				return args[i+1], true
-			}
-			return nil, false
-		}
-	}
-	return nil, false
+	_, block, ok := scanXReadOptions(args)
+	return block, ok
 }
 
 // blockingTimeoutRules maps each FlagBlocking command to where its timeout
@@ -243,4 +233,35 @@ func blockingZeroTimeout(s *Server, args [][]byte) bool {
 	}
 	f, err := strconv.ParseFloat(string(val), 64)
 	return err == nil && f == 0
+}
+
+// CommandKeyCount returns how many key arguments args carries according to
+// the command table's key spec, without executing anything. It returns 0 for
+// an unknown command or a wrong arity.
+func (s *Server) CommandKeyCount(args []string) int {
+	if len(args) == 0 {
+		return 0
+	}
+	cmd := s.lookupCommand([]byte(args[0]))
+	if cmd == nil {
+		return 0
+	}
+	if (cmd.Arity > 0 && len(args) != cmd.Arity) || (cmd.Arity < 0 && len(args) < -cmd.Arity) {
+		return 0
+	}
+	argv := make([][]byte, len(args))
+	for i, a := range args {
+		argv[i] = []byte(a)
+	}
+	pos, _ := cmd.KeyPositions(argv)
+	return len(pos)
+}
+
+// CommandName returns the canonical name of a registered command, or "" when
+// name is not in the command table.
+func (s *Server) CommandName(name string) string {
+	if cmd := s.lookupCommand([]byte(name)); cmd != nil {
+		return cmd.Name
+	}
+	return ""
 }

@@ -1,0 +1,4 @@
+{{define "reply"}}<div class="entry"{{if .Hist}} data-history="{{.Hist}}"{{end}}><div class="entry-cmd mono">{{.Cmd}}</div>{{template "node" .Reply}}{{if .InMulti}}<div class="multi-open">transaction open ({{.Queued}} queued) - EXEC or DISCARD</div>{{end}}</div>{{end}}
+{{define "node"}}{{if eq .Kind "array"}}{{if .Items}}<ol class="reply reply-array mono">{{range .Items}}<li>{{template "node" .}}</li>{{end}}</ol>{{else}}<div class="reply reply-empty mono">(empty array)</div>{{end}}
+{{else if eq .Kind "map"}}{{if .Items}}<dl class="reply reply-map mono">{{range .Pairs}}<dt>{{template "node" index . 0}}</dt><dd>{{template "node" index . 1}}</dd>{{end}}</dl>{{else}}<div class="reply reply-empty mono">(empty map)</div>{{end}}
+{{else}}<div class="reply reply-{{.Kind}}{{if .Binary}} reply-binary{{end}} mono">{{.Text}}</div>{{end}}{{end}}

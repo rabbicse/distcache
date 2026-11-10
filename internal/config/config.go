@@ -7,12 +7,15 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math"
+	"net"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rabbicse/distcache/internal/ds"
 	"github.com/rabbicse/distcache/internal/resp"
@@ -64,6 +67,17 @@ type Config struct {
 	maxClientsStr   string
 	clientOutputStr string
 	saveSeen        bool
+
+	// Web console settings (static, guarded by mu).
+	WebPort           int           // web-port: 0 disables the console
+	WebBind           string        // web-bind: listen address
+	WebTLS            string        // web-tls: auto, on or off
+	WebTLSCert        string        // web-tls-cert: certificate file
+	WebTLSKey         string        // web-tls-key: private key file
+	WebTLSHosts       []string      // web-tls-hosts: names for the generated certificate
+	WebTrustedProxy   []string      // web-trusted-proxy: proxy IPs or CIDRs
+	WebInsecure       bool          // web-insecure: allow plain HTTP beyond loopback
+	WebSessionTimeout time.Duration // web-session-timeout: idle session lifetime
 
 	// Hot values.
 	MaxMemory         atomic.Int64
@@ -211,17 +225,20 @@ func NotifyFlagsString(f int64) string {
 // Default returns a configuration with Redis-equivalent defaults.
 func Default() *Config {
 	c := &Config{
-		Bind:           []string{"0.0.0.0"},
-		Port:           6379,
-		Dir:            ".",
-		DBFilename:     "dump.dcs",
-		AppendFilename: "appendonly.aof",
-		AppendFsync:    "everysec",
-		Save:           [][2]int64{{3600, 1}, {300, 100}, {60, 10000}},
-		LogLevel:       "notice",
-		Databases:      16,
-		Shards:         256,
-		renamed:        map[string]string{},
+		Bind:              []string{"0.0.0.0"},
+		Port:              6379,
+		Dir:               ".",
+		DBFilename:        "dump.dcs",
+		AppendFilename:    "appendonly.aof",
+		AppendFsync:       "everysec",
+		Save:              [][2]int64{{3600, 1}, {300, 100}, {60, 10000}},
+		LogLevel:          "notice",
+		Databases:         16,
+		Shards:            256,
+		WebBind:           "127.0.0.1",
+		WebTLS:            "auto",
+		WebSessionTimeout: 30 * time.Minute,
+		renamed:           map[string]string{},
 	}
 	c.MaxMemoryPolicy.Store(PolicyNoEviction)
 	c.MaxMemorySamples.Store(5)
@@ -394,6 +411,7 @@ func (c *Config) registerParams() {
 			c.Shards = n
 			return nil
 		})
+	c.registerWebParams()
 	c.strParam("dir", true, &c.Dir)
 	c.strParam("dbfilename", true, &c.DBFilename)
 	c.strParam("appendfilename", false, &c.AppendFilename)
@@ -736,4 +754,103 @@ func (c *Config) Rewrite() error {
 		return err
 	}
 	return os.Rename(tmp, c.ConfigFile)
+}
+
+// registerWebParams registers the static web console parameters.
+func (c *Config) registerWebParams() {
+	c.add("web-port", false, func(c *Config) string { return strconv.Itoa(c.WebPort) },
+		func(c *Config, v string) error {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 || n > 65535 {
+				return errors.New("argument must be between 0 and 65535 inclusive")
+			}
+			c.WebPort = n
+			return nil
+		})
+	c.strParam("web-bind", false, &c.WebBind)
+	c.add("web-tls", false, func(c *Config) string { return c.WebTLS },
+		func(c *Config, v string) error {
+			switch m := strings.ToLower(v); m {
+			case "auto", "on", "off":
+				c.WebTLS = m
+				return nil
+			}
+			return errors.New("argument must be one of the following: auto, on, off")
+		})
+	c.strParam("web-tls-cert", false, &c.WebTLSCert)
+	c.strParam("web-tls-key", false, &c.WebTLSKey)
+	c.listParam("web-tls-hosts", &c.WebTLSHosts, nil)
+	c.listParam("web-trusted-proxy", &c.WebTrustedProxy, validIPOrCIDR)
+	c.add("web-insecure", false, func(c *Config) string { return yesno(c.WebInsecure) },
+		func(c *Config, v string) error {
+			b, err := parseYesNo(v)
+			if err != nil {
+				return err
+			}
+			c.WebInsecure = b
+			return nil
+		})
+	c.add("web-session-timeout", false, func(c *Config) string { return c.WebSessionTimeout.String() },
+		func(c *Config, v string) error {
+			d, err := parseDuration(v)
+			if err != nil {
+				return err
+			}
+			if d < minWebSessionTimeout {
+				return errors.New("argument must be at least 1m")
+			}
+			c.WebSessionTimeout = d
+			return nil
+		})
+}
+
+// listParam registers a static comma-separated list parameter. A repeated
+// directive replaces the list. When check is non-nil every entry must pass it.
+func (c *Config) listParam(name string, p *[]string, check func(string) error) {
+	c.add(name, false, func(c *Config) string { return strings.Join(*p, ",") },
+		func(c *Config, v string) error {
+			var out []string
+			for _, f := range strings.Split(v, ",") {
+				if f = strings.TrimSpace(f); f != "" {
+					if check != nil {
+						if err := check(f); err != nil {
+							return err
+						}
+					}
+					out = append(out, f)
+				}
+			}
+			*p = out
+			return nil
+		})
+}
+
+// validIPOrCIDR accepts an IP address or a CIDR block.
+func validIPOrCIDR(v string) error {
+	if net.ParseIP(v) != nil {
+		return nil
+	}
+	if _, _, err := net.ParseCIDR(v); err == nil {
+		return nil
+	}
+	return fmt.Errorf("invalid IP or CIDR %q", v)
+}
+
+// minWebSessionTimeout is the shortest accepted web-session-timeout; shorter
+// values would expire sessions before a user could act.
+const minWebSessionTimeout = time.Minute
+
+// parseDuration accepts Go duration syntax ("30m") or plain seconds ("1800").
+func parseDuration(v string) (time.Duration, error) {
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n < 0 || n > int64(math.MaxInt64/time.Second) {
+			return 0, errors.New("argument is out of range for a duration")
+		}
+		return time.Duration(n) * time.Second, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, errors.New("argument must be a duration such as 30m or a number of seconds")
+	}
+	return d, nil
 }

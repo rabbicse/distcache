@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} - DistCache</title>
+<link rel="icon" href="/static/logo-mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><img src="/static/logo-mark.svg" alt="" width="28" height="28"><span>DistCache</span></a>
+</header>
+<main class="center">
+  <h1 class="error-code">{{.Status}}</h1>
+  <p>{{.Message}}</p>
+  <p><a href="/">Back to the dashboard</a></p>
+</main>
+</body>
+</html>
