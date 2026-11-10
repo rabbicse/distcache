@@ -132,6 +132,31 @@ type Shard struct {
 	dbs     []dbShard
 	pending bool
 	overlay map[int]map[string]*Entry
+
+	// ops and lockWait are statistics updated atomically outside mu.
+	ops      atomic.Int64 // commands that locked this shard
+	lockWait atomic.Int64 // nanoseconds spent blocked acquiring mu
+	_        [64]byte     // keeps neighbouring shards' counters off this cache line
+}
+
+// lock acquires the shard lock, timing the wait only when the fast
+// TryLock path fails so uncontended locking makes no clock calls.
+func (sh *Shard) lock(write bool) {
+	if write {
+		if sh.mu.TryLock() {
+			return
+		}
+		start := time.Now()
+		sh.mu.Lock()
+		sh.lockWait.Add(int64(time.Since(start)))
+		return
+	}
+	if sh.mu.TryRLock() {
+		return
+	}
+	start := time.Now()
+	sh.mu.RLock()
+	sh.lockWait.Add(int64(time.Since(start)))
 }
 
 // Keyspace is the full multi-database dataset.
@@ -226,11 +251,7 @@ func (ks *Keyspace) ShardSet(keys []string, dst []int) []int {
 // Lock acquires shard locks (idx sorted ascending).
 func (ks *Keyspace) Lock(idx []int, write bool) {
 	for _, i := range idx {
-		if write {
-			ks.shards[i].mu.Lock()
-		} else {
-			ks.shards[i].mu.RLock()
-		}
+		ks.shards[i].lock(write)
 	}
 }
 
@@ -248,11 +269,7 @@ func (ks *Keyspace) Unlock(idx []int, write bool) {
 // LockAll locks every shard.
 func (ks *Keyspace) LockAll(write bool) {
 	for _, sh := range ks.shards {
-		if write {
-			sh.mu.Lock()
-		} else {
-			sh.mu.RLock()
-		}
+		sh.lock(write)
 	}
 }
 
@@ -269,11 +286,38 @@ func (ks *Keyspace) UnlockAll(write bool) {
 
 // LockShard locks a single shard.
 func (ks *Keyspace) LockShard(i int, write bool) {
-	if write {
-		ks.shards[i].mu.Lock()
-	} else {
-		ks.shards[i].mu.RLock()
+	ks.shards[i].lock(write)
+}
+
+// CountOps records one operation on each shard in idx.
+func (ks *Keyspace) CountOps(idx []int) {
+	for _, i := range idx {
+		ks.shards[i].ops.Add(1)
 	}
+}
+
+// ShardCounters is a point-in-time view of one shard's statistics.
+type ShardCounters struct {
+	Keys          int64 // keys across every database in the shard
+	Ops           int64 // commands that locked the shard
+	LockWaitNanos int64 // total time spent blocked acquiring the shard lock
+}
+
+// ShardStats appends one ShardCounters per shard to dst[:0] and returns it.
+// Each shard is read-locked briefly on its own, never all at once, so the
+// call never stalls the whole keyspace.
+func (ks *Keyspace) ShardStats(dst []ShardCounters) []ShardCounters {
+	dst = dst[:0]
+	for _, sh := range ks.shards {
+		sh.mu.RLock()
+		var keys int64
+		for d := range sh.dbs {
+			keys += int64(len(sh.dbs[d].keys))
+		}
+		sh.mu.RUnlock()
+		dst = append(dst, ShardCounters{Keys: keys, Ops: sh.ops.Load(), LockWaitNanos: sh.lockWait.Load()})
+	}
+	return dst
 }
 
 // UnlockShard unlocks a single shard.

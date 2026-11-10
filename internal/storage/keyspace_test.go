@@ -361,3 +361,54 @@ func TestHoldReleaseSnapshots(t *testing.T) {
 		t.Fatal("snapshot did not start after ReleaseSnapshots")
 	}
 }
+
+func TestKeyspace_ShardStatsCountsKeysAndOps(t *testing.T) {
+	ks := New(8, 2)
+	db := &DB{KS: ks, Idx: 0, Now: 1, Write: true}
+	for i := range 100 {
+		key := fmt.Sprintf("k%d", i)
+		idx := []int{ks.ShardOf(key)}
+		ks.Lock(idx, true)
+		db.Set(key, &Entry{Value: []byte("v")})
+		ks.CountOps(idx)
+		ks.Unlock(idx, true)
+	}
+	var keys, ops int64
+	for _, sc := range ks.ShardStats(nil) {
+		keys += sc.Keys
+		ops += sc.Ops
+	}
+	if keys != 100 {
+		t.Errorf("keys: got %d, want 100", keys)
+	}
+	if ops < 100 {
+		t.Errorf("ops: got %d, want >= 100", ops)
+	}
+}
+
+func TestKeyspace_LockWaitRecordedOnlyWhenContended(t *testing.T) {
+	ks := New(4, 1)
+	ks.Lock([]int{1}, true)
+	ks.Unlock([]int{1}, true)
+	ks.LockShard(2, false)
+	ks.UnlockShard(2, false)
+	for i, sc := range ks.ShardStats(nil) {
+		if sc.LockWaitNanos != 0 {
+			t.Fatalf("shard %d uncontended wait: got %d, want 0", i, sc.LockWaitNanos)
+		}
+	}
+	held := make(chan struct{})
+	go func() {
+		ks.LockShard(3, true)
+		close(held)
+		time.Sleep(20 * time.Millisecond)
+		ks.UnlockShard(3, true)
+	}()
+	<-held
+	ks.Lock([]int{3}, true)
+	ks.Unlock([]int{3}, true)
+	got := time.Duration(ks.ShardStats(nil)[3].LockWaitNanos)
+	if got < 15*time.Millisecond {
+		t.Errorf("contended wait: got %v, want >= 15ms", got)
+	}
+}
