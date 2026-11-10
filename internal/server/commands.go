@@ -242,12 +242,12 @@ func (s *Server) registerCommands() {
 		{"watch", -2, "noscript loading stale fast allow_busy txctl", 1, -1, 1, "transaction", cmdWatch, nil},
 		{"unwatch", 1, "noscript loading stale fast allow_busy txctl", 0, 0, 0, "transaction", cmdUnwatch, nil},
 		// scripting
-		{"eval", -3, "noscript skip_monitor may_replicate lockall", 0, 0, 0, "scripting", cmdEval, numKeysAt(2)},
-		{"evalsha", -3, "noscript skip_monitor may_replicate lockall", 0, 0, 0, "scripting", cmdEvalSha, numKeysAt(2)},
+		{"eval", -3, "noscript skip_monitor may_replicate lockall exclusive", 0, 0, 0, "scripting", cmdEval, numKeysAt(2)},
+		{"evalsha", -3, "noscript skip_monitor may_replicate lockall exclusive", 0, 0, 0, "scripting", cmdEvalSha, numKeysAt(2)},
 		{"eval_ro", -3, "noscript skip_monitor readonly lockall", 0, 0, 0, "scripting", cmdEvalRO, numKeysAt(2)},
 		{"evalsha_ro", -3, "noscript skip_monitor readonly lockall", 0, 0, 0, "scripting", cmdEvalShaRO, numKeysAt(2)},
 		{"script", -2, "noscript allow_busy", 0, 0, 0, "scripting", cmdScript, nil},
-		{"fcall", -3, "noscript skip_monitor may_replicate lockall", 0, 0, 0, "scripting", cmdFCall, numKeysAt(2)},
+		{"fcall", -3, "noscript skip_monitor may_replicate lockall exclusive", 0, 0, 0, "scripting", cmdFCall, numKeysAt(2)},
 		{"fcall_ro", -3, "noscript skip_monitor readonly lockall", 0, 0, 0, "scripting", cmdFCallRO, numKeysAt(2)},
 		{"function", -2, "noscript may_replicate allow_busy", 0, 0, 0, "scripting", cmdFunction, nil},
 		// connection

@@ -139,8 +139,9 @@ func cmdPFCount(c *Ctx) {
 // in its header, as pfcountCommand does, so GET after PFCOUNT returns the
 // same bytes as Redis; like Redis it counts as a change and propagates the
 // PFCOUNT. It needs write locks on key, which the top-level PFCOUNT
-// (FlagExclusive) and EXEC take; inside a script, which only holds read
-// locks, the cache is left invalid.
+// (FlagExclusive) and EXEC take. Inside a script the cache is left invalid:
+// script commands run with writeLocked false even though EVAL/FCALL now hold
+// write locks, so this stays conservative.
 func (c *Ctx) cacheHLLCount(key string, v []byte, n uint64) {
 	if !c.writeLocked {
 		return
