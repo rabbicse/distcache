@@ -28,7 +28,7 @@ Integration tests should use [internal/testutil](internal/testutil/client.go): `
 
 **Request path:** `serveClient` ([client.go](internal/server/client.go), one goroutine per connection) → RESP parsing ([internal/resp](internal/resp/)) → `processCommand` ([dispatch.go](internal/server/dispatch.go)) does Redis's pre-exec checks (arity, auth, MULTI queueing, pubsub context, LOADING/BUSY/READONLY/OOM/MISCONF via `preExecRejection`) → `call` acquires locks and runs the handler → `runHandler` does post-processing (propagation, WATCH invalidation, blocked-client wakeups, keyspace notifications).
 
-**Command table:** every command is registered in [commands.go](internal/server/commands.go) as a `regSpec` (name, arity, flag string, first/last/step key positions, group, handler, optional `KeysFunc`). Handlers live in `cmd_<family>.go` and take a `*Ctx`. The flags drive behavior in the dispatcher, so getting them right matters:
+**Command table:** every command is registered in [commands.go](internal/server/commands.go) as a `commandSpec` (name, arity, flag string, first/last/step key positions, group, handler, optional `KeysFunc`). Handlers live in `cmd_<family>.go` and take a `*Ctx`. The flags drive behavior in the dispatcher, so getting them right matters:
 - `write` / `readonly` decide write vs read shard locks and propagation; `denyoom` triggers eviction checks.
 - Key positions (or a custom `KeysFunc`) determine **which shards get locked** — a wrong key spec means unlocked access to data.
 - `global` = handler walks the keyspace and locks shards itself (KEYS, SCAN…); `lockall` = needs every shard lock and runs inside the snapshot barrier (FLUSHALL, SWAPDB, EVAL…).

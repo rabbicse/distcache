@@ -174,7 +174,7 @@ func (c *Ctx) NowMs() int64 { return c.DB.Now }
 // NowTime returns NowMs as a time.Time.
 func (c *Ctx) NowTime() time.Time { return time.UnixMilli(c.DB.Now) }
 
-// execUnit groups propagation for one atomic execution (command, EXEC,
+// executionUnit groups propagation for one atomic execution (command, EXEC,
 // script) so it is written to AOF/replicas as a single block.
 type executionUnit struct {
 	db       int
