@@ -1,3 +1,5 @@
+// Hash commands, including field expiry (HEXPIRE family).
+
 package server
 
 import (

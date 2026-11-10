@@ -1,3 +1,5 @@
+// Stream value type: entry IDs, entries, consumer groups and pending lists.
+
 package ds
 
 import (

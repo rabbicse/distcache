@@ -31,6 +31,8 @@ var hllScript = []testutil.Step{
 	testutil.S(":1", "PFADD", "h", "a", "b", "c"),
 	testutil.S(":0", "PFADD", "h", "a", "b"),
 	testutil.S(":3", "PFCOUNT", "h"),
+	// PFCOUNT stored the cardinality in the header, so GET sees it (B24).
+	testutil.S(`"HYLL\x01\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00`+"`"+`\xf3\x80P\xb1\x84K\xfb\x80BZ"`, "GET", "h"),
 	testutil.S(":1", "PFADD", "h2", "c", "d", "e"),
 	testutil.S(":5", "PFCOUNT", "h", "h2"),
 	testutil.S(":5", "PFCOUNT", "h", "h2", "missing"),
@@ -61,9 +63,10 @@ const (
 	palermoLat = "38.115556"
 	cataniaLon = "15.087269"
 	cataniaLat = "37.502669"
-	// Coordinates as Redis returns them after geohash encoding.
-	palermoPos = `*["13.36138933897018433", "38.11555639549629859"]`
-	cataniaPos = `*["15.08726745843887329", "37.50266842333162032"]`
+	// Coordinates as Redis 8.4 returns them after geohash encoding
+	// (shortest round-trip form; DistCache differs, known bug B29).
+	palermoPos = `*["13.361389338970184", "38.1155563954963"]`
+	cataniaPos = `*["15.087267458438873", "37.50266842333162"]`
 )
 
 // hllDenseScript promotes an HLL to the dense encoding. Its estimates are
@@ -81,16 +84,13 @@ var hllDenseScript = []testutil.Step{
 	testutil.S(":0", hllBulkAdd("big", 5000)...),
 }
 
-// geoUnverifiedScript runs only in the differential test: Redis 8.4's exact
-// error texts for these steps are not verified here.
-var geoUnverifiedScript = []testutil.Step{
-	testutil.S("", "ZRANGE", "dst3", "0", "-1", "WITHSCORES"),
-	testutil.S("", "GEOADD", "gu", palermoLon, palermoLat, "Palermo"),
-	testutil.S("", "GEOSEARCHSTORE", "dst", "gu", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "WITHDIST"),
-	testutil.S("", "GEORADIUS", "gu", "15", "37", "200", "km", "WITHDIST", "STORE", "dst"),
-	testutil.S("", "GEOSEARCH", "gu", "FROMLONLAT", "15", "37"),
-	testutil.S("", "GEOSEARCH", "gu", "BYRADIUS", "200", "km"),
-	testutil.S("", "GEOSEARCH", "gu", "FROMMEMBER", "Palermo", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km"),
+// geoErrorScript holds option-conflict errors whose texts were verified
+// against Redis 8.4.8. Divergent ones live in redis84_divergence_test.go.
+var geoErrorScript = []testutil.Step{
+	testutil.S(":1", "GEOADD", "gu", palermoLon, palermoLat, "Palermo"),
+	testutil.S("-ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options", "GEORADIUS", "gu", "15", "37", "200", "km", "WITHDIST", "STORE", "dst"),
+	testutil.S(arityErr("geosearch"), "GEOSEARCH", "gu", "FROMLONLAT", "15", "37"),
+	testutil.S(arityErr("geosearch"), "GEOSEARCH", "gu", "BYRADIUS", "200", "km"),
 }
 
 // geoScript covers every geo command.
@@ -107,7 +107,6 @@ var geoScript = []testutil.Step{
 	testutil.S(errNotFloat, "GEOADD", "g", "x", "38", "x"),
 	testutil.S(`"3479099956230698"`, "ZSCORE", "g", "Palermo"),
 	testutil.S(`"3479447370796909"`, "ZSCORE", "g", "Catania"),
-	testutil.S("*["+palermoPos+", "+cataniaPos+", (nil-array)]", "GEOPOS", "g", "Palermo", "Catania", "nope"),
 	testutil.S("*[(nil-array)]", "GEOPOS", "missing", "a"),
 	testutil.S(`"166274.1516"`, "GEODIST", "g", "Palermo", "Catania"),
 	testutil.S(`"166274.1516"`, "GEODIST", "g", "Palermo", "Catania", "m"),
@@ -124,8 +123,6 @@ var geoScript = []testutil.Step{
 	testutil.S(`*["Palermo", "Catania"]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "DESC"),
 	testutil.S(`*["Catania"]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "100", "km"),
 	testutil.S(`*[*["Catania", "56.4413"], *["Palermo", "190.4424"]]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "WITHDIST"),
-	testutil.S(`*[*["Catania", "56.4413", `+cataniaPos+`], *["Palermo", "190.4424", `+palermoPos+`]]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYBOX", "400", "400", "km", "ASC", "WITHCOORD", "WITHDIST"),
-	testutil.S(`*[*["Catania", `+cataniaPos+`]]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "COUNT", "1", "WITHCOORD"),
 	testutil.S(`*["Catania", "Palermo"]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "COUNT", "2", "ANY"),
 	testutil.S(`*[*["Palermo", "0.0000"], *["Catania", "166.2742"]]`, "GEOSEARCH", "g", "FROMMEMBER", "Palermo", "BYRADIUS", "200", "km", "ASC", "WITHDIST"),
 	testutil.S(`*["Palermo"]`, "GEOSEARCH", "g", "FROMMEMBER", "Palermo", "BYBOX", "10", "10", "km"),
@@ -162,10 +159,11 @@ func TestHllGeoCommands(t *testing.T) {
 	c := testutil.MustDial(t, addr)
 	testutil.RunScript(t, c, hllScript)
 	testutil.RunScript(t, c, geoScript)
+	testutil.RunScript(t, c, geoErrorScript)
 }
 
 func TestHllGeoCommandsDifferential(t *testing.T) {
-	testutil.Differential(t, concat(hllScript, hllDenseScript, geoScript, geoUnverifiedScript), testutil.KnownDivergences)
+	testutil.Differential(t, concat(hllScript, hllDenseScript, geoScript, geoErrorScript), testutil.KnownDivergences)
 }
 
 // Redis creates small HLLs in the sparse encoding (byte 4 of the header is 1)
@@ -177,6 +175,27 @@ func TestHllGeoCommands_SparseEncoding(t *testing.T) {
 		testutil.S(`"\x01"`, "GETRANGE", "h", "4", "4"),
 		testutil.S(":1", hllBulkAdd("h", 5000)...),
 		testutil.S(`"\x00"`, "GETRANGE", "h", "4", "4"),
+	})
+}
+
+// TestHllGeoCommands_SparseMaxBytes checks hll-sparse-max-bytes moves the
+// sparse-to-dense promotion point (B25).
+func TestHllGeoCommands_SparseMaxBytes(t *testing.T) {
+	_, addr := testutil.StartServer(t, nil)
+	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
+		testutil.S(`*["hll-sparse-max-bytes", "3000"]`, "CONFIG", "GET", "hll-sparse-max-bytes"),
+		testutil.S(":1", "PFADD", "keep", "a", "b", "c"),
+		testutil.S(`"\x01"`, "GETRANGE", "keep", "4", "4"),
+		testutil.S(":1", "PFADD", "src", "x"),
+		testutil.S("+OK", "CONFIG", "SET", "hll-sparse-max-bytes", "0"),
+		testutil.S(`*["hll-sparse-max-bytes", "0"]`, "CONFIG", "GET", "hll-sparse-max-bytes"),
+		testutil.S(":1", "PFADD", "h", "a"),
+		testutil.S(`"\x00"`, "GETRANGE", "h", "4", "4"),
+		testutil.S(":3", "PFCOUNT", "keep"),
+		testutil.S(":1", "PFADD", "keep", "d"),
+		testutil.S(`"\x00"`, "GETRANGE", "keep", "4", "4"),
+		testutil.S("+OK", "PFMERGE", "m", "src"),
+		testutil.S(`"\x00"`, "GETRANGE", "m", "4", "4"),
 	})
 }
 
@@ -222,4 +241,55 @@ func TestHllGeoCommands_GeoAddXXNX(t *testing.T) {
 		testutil.S(errSyntax, "GEOADD", "g", "XX", "NX", "1", "1", "x"),
 		testutil.S(errSyntax, "GEOADD", "g", "1", "2", "m", "3"),
 	})
+}
+
+// TestHllGeoCommands_PFCountCachesCardinality checks PFCOUNT stores the
+// cardinality in header bytes 8..15 (little-endian, the invalid flag in the
+// MSB of byte 15 cleared) like Redis's pfcountCommand, both standalone and
+// inside MULTI (B24).
+func TestHllGeoCommands_PFCountCachesCardinality(t *testing.T) {
+	_, addr := testutil.StartServer(t, nil)
+	c := testutil.MustDial(t, addr)
+	get := func(key string) []byte {
+		t.Helper()
+		v, err := c.Do("GET", key)
+		if err != nil {
+			t.Fatalf("GET %s: %v", key, err)
+		}
+		return v.Str
+	}
+	for _, tc := range []struct {
+		name  string
+		key   string
+		multi bool
+	}{
+		{"standalone", "h", false},
+		{"multi", "hm", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.RunScript(t, c, []testutil.Step{testutil.S(":1", "PFADD", tc.key, "a", "b", "c")})
+			before := get(tc.key)
+			if before[15]&0x80 == 0 {
+				t.Fatalf("PFADD: got header byte 15 %#x, want the invalid flag set", before[15])
+			}
+			if tc.multi {
+				testutil.RunScript(t, c, []testutil.Step{
+					testutil.S("+OK", "MULTI"),
+					testutil.S("+QUEUED", "PFCOUNT", tc.key),
+					testutil.S("*[:3]", "EXEC"),
+				})
+			} else {
+				testutil.RunScript(t, c, []testutil.Step{testutil.S(":3", "PFCOUNT", tc.key)})
+			}
+			want := append([]byte(nil), before...)
+			copy(want[8:16], []byte{3, 0, 0, 0, 0, 0, 0, 0})
+			if got := get(tc.key); string(got) != string(want) {
+				t.Fatalf("GET after PFCOUNT: got %q, want %q", got, want)
+			}
+			testutil.RunScript(t, c, []testutil.Step{
+				testutil.S(":1", "PFADD", tc.key, "d"),
+				testutil.S(":4", "PFCOUNT", tc.key),
+			})
+		})
+	}
 }

@@ -60,18 +60,19 @@ Structural notes: everything lives in one `package server` on `*Server`; replica
 - Reply batching: 16 KB static buffer per client, flushed from `beforeSleep`.
 - Cluster client contract: `HASH_SLOT = CRC16-XMODEM(key) mod 16384`, hash tag is the substring between the first `{` and the next `}` if non-empty; `-MOVED <slot> <host:port>`; `ASKING` is a one-shot flag; migration via `CLUSTER SETSLOT ... IMPORTING/MIGRATING`, `GETKEYSINSLOT`, `MIGRATE`, `SETSLOT ... NODE`.
 
-## 3. Roadmap: six sub-projects
+## 3. Roadmap: seven sub-projects
 
 Each sub-project gets its own spec → implementation plan → implementation cycle. This document is the full spec only for sub-project 1; sections 4–8 record the agreed direction for the others so later specs start from a shared understanding.
 
 | # | Sub-project | Depends on | Outcome |
 |---|---|---|---|
 | 1 | Test harness + baseline (+ README rewrite) | — | Safety net, tooling, measured baseline |
-| 2 | Single-node throughput (approach C) | 1 | Multi-core throughput that beats Redis on the same box, proven by load tests |
+| 2 | Single-node throughput (approach C) | 1 | Multi-core throughput that beats Redis on the same box, proven by load tests; Unix domain socket listener |
 | 3 | Cluster mode | 2 | Redis-Cluster-client-compatible horizontal scaling |
 | 4 | Production hardening | 1 | ACL users, auto AOF rewrite, min-replicas, FAILOVER, TLS |
-| 5 | Client examples + browser gateway | 3 | Go, Java, Python, Node/TypeScript examples; HTTP/WebSocket gateway for React |
+| 5 | Client examples + browser gateway | 3 | Go, Java, Python, Node/TypeScript examples (started in `examples/`); WebSocket gateway for browsers only — apps use RESP over TCP |
 | 6 | Technical guides | each | One numbered guide per subsystem, written as each sub-project lands |
+| 7 | Built-in web console | 4 | htmx UI embedded in distcache-server, black theme; stats, key/value browser; authenticated (ACL users, TLS off-localhost, CSRF, audit log). Added 2026-11-10 |
 
 Order rationale: tests must exist before the hot path is refactored (1 → 2); cluster routing lives in the same hot path, so it follows the refactor (2 → 3); hardening is independent and can interleave; examples need cluster to demonstrate scaling; docs are written continuously, not at the end.
 

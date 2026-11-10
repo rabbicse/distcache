@@ -1,3 +1,5 @@
+// Interpreter state, closures, call frames and runtime error types.
+
 package lua
 
 import (
@@ -9,6 +11,7 @@ import (
 // LuaError is a Lua runtime error (catchable by pcall).
 type LuaError struct{ Value Value }
 
+// Error returns the error value as a string; a table error uses its "err" field.
 func (e *LuaError) Error() string {
 	if s, ok := e.Value.(string); ok {
 		return s
@@ -25,6 +28,7 @@ func (e *LuaError) Error() string {
 // timeouts, out of memory).
 type FatalError struct{ Msg string }
 
+// Error returns the fatal error message.
 func (e *FatalError) Error() string { return e.Msg }
 
 type cell struct{ v Value }

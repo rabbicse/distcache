@@ -1,3 +1,5 @@
+// Master/replica replication with PSYNC-style partial resync.
+
 package server
 
 import (
@@ -131,9 +133,9 @@ func (r *replicaConn) sender() {
 		if len(data) == 0 {
 			continue
 		}
-		r.c.wmu.Lock()
+		r.c.writeMu.Lock()
 		_, err := r.c.conn.Write(data)
-		r.c.wmu.Unlock()
+		r.c.writeMu.Unlock()
 		if err != nil {
 			r.close()
 			return
@@ -142,29 +144,29 @@ func (r *replicaConn) sender() {
 }
 
 type replication struct {
-	s *Server
+	server *Server
 
-	mu        sync.Mutex
-	replID    string
-	replID2   string
-	secondOff int64
+	mu           sync.Mutex
+	replID       string
+	replID2      string
+	secondOffset int64
 
 	// replica side
-	isRep       atomic.Bool
-	masterHost  string
-	masterPort  string
-	linkUp      atomic.Bool
-	linkState   atomic.Value // string
-	stopCh      chan struct{}
-	masterOff   atomic.Int64
-	lastIO      atomic.Int64
-	syncing     atomic.Bool
-	masterConn  net.Conn
-	lastPingOut time.Time
+	replicaMode  atomic.Bool
+	masterHost   string
+	masterPort   string
+	linkUp       atomic.Bool
+	linkState    atomic.Value // string
+	stopCh       chan struct{}
+	masterOffset atomic.Int64
+	lastIO       atomic.Int64
+	syncing      atomic.Bool
+	masterConn   net.Conn
+	lastPingOut  time.Time
 }
 
 func newReplication(s *Server) *replication {
-	r := &replication{s: s, replID: randomHex(40), secondOff: -1}
+	r := &replication{server: s, replID: randomHex(40), secondOffset: -1}
 	r.linkState.Store("none")
 	return r
 }
@@ -177,7 +179,7 @@ func randomHex(n int) string {
 
 func sha1Sum(b []byte) [20]byte { return sha1.Sum(b) }
 
-func (r *replication) isReplica() bool { return r.isRep.Load() }
+func (r *replication) isReplica() bool { return r.replicaMode.Load() }
 
 func (r *replication) changeReplID() {
 	r.mu.Lock()
@@ -186,7 +188,7 @@ func (r *replication) changeReplID() {
 }
 
 func (r *replication) backlogSize() int {
-	p := r.s.prop
+	p := r.server.propagator
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.backlog == nil {
@@ -205,7 +207,7 @@ func (r *replication) stop() {
 		_ = r.masterConn.Close() // best-effort: cleanup after failure or teardown
 	}
 	r.mu.Unlock()
-	p := r.s.prop
+	p := r.server.propagator
 	p.mu.Lock()
 	for rc := range p.replicas {
 		rc.close()
@@ -215,7 +217,7 @@ func (r *replication) stop() {
 
 // cron runs once per second.
 func (r *replication) cron() {
-	p := r.s.prop
+	p := r.server.propagator
 	p.mu.Lock()
 	n := len(p.replicas)
 	if n > 0 && time.Since(r.lastPingOut) >= replPingPeriod {
@@ -237,7 +239,7 @@ func cmdReplconf(c *Ctx) {
 		c.SyntaxErr()
 		return
 	}
-	cl := c.cl
+	cl := c.client
 	for i := 1; i < len(c.Args); i += 2 {
 		opt := strings.ToLower(c.Arg(i))
 		val := c.Arg(i + 1)
@@ -254,7 +256,7 @@ func cmdReplconf(c *Ctx) {
 			return // no reply to ACK
 		case "getack":
 			if cl.isMaster {
-				c.s.repl.sendAck()
+				c.server.replication.sendAck()
 			}
 			return
 		default:
@@ -266,7 +268,7 @@ func cmdReplconf(c *Ctx) {
 }
 
 func cmdSync(c *Ctx) {
-	cl := c.cl
+	cl := c.client
 	if cl.isMaster || c.inMulti || c.inScript {
 		c.Err("ERR Replica can't interact with the keyspace")
 		return
@@ -289,7 +291,7 @@ func cmdSync(c *Ctx) {
 	rc.state.Store("wait_bgsave")
 	cl.replica = rc
 	cl.isReplica = true
-	c.s.repl.attachReplica(rc, replid, off, psync)
+	c.server.replication.attachReplica(rc, replid, off, psync)
 }
 
 // attachReplica serves a PSYNC (psync true) or legacy SYNC request on rc:
@@ -297,20 +299,20 @@ func cmdSync(c *Ctx) {
 // Like Redis, only PSYNC clients get the +FULLRESYNC line before the
 // snapshot.
 func (r *replication) attachReplica(rc *replicaConn, replid string, off int64, psync bool) {
-	s := r.s
-	p := s.prop
+	s := r.server
+	p := s.propagator
 	go rc.sender()
 	// Partial resync attempt.
 	r.mu.Lock()
-	id, id2, second := r.replID, r.replID2, r.secondOff
+	id, id2, second := r.replID, r.replID2, r.secondOffset
 	r.mu.Unlock()
 	p.mu.Lock()
 	if p.backlog != nil && off > 0 && (replid == id || (replid == id2 && off <= second)) &&
 		off >= p.backlog.first && off <= p.backlog.first+int64(p.backlog.histlen) {
 		data := p.backlog.from(off)
-		rc.c.wmu.Lock()
+		rc.c.writeMu.Lock()
 		_, err := rc.c.conn.Write([]byte("+CONTINUE " + id + "\r\n"))
-		rc.c.wmu.Unlock()
+		rc.c.writeMu.Unlock()
 		if err != nil {
 			p.mu.Unlock()
 			rc.close()
@@ -354,12 +356,12 @@ func (r *replication) attachReplica(rc *replicaConn, replid string, off int64, p
 	if psync {
 		header = fmt.Sprintf("+FULLRESYNC %s %d\r\n", id, startOff) + header
 	}
-	rc.c.wmu.Lock()
+	rc.c.writeMu.Lock()
 	_, err = rc.c.conn.Write([]byte(header))
 	if err == nil {
 		_, err = rc.c.conn.Write(buf.Bytes())
 	}
-	rc.c.wmu.Unlock()
+	rc.c.writeMu.Unlock()
 	if err != nil {
 		r.removeReplica(rc)
 		rc.close()
@@ -375,7 +377,7 @@ func (r *replication) attachReplica(rc *replicaConn, replid string, off int64, p
 }
 
 func (r *replication) removeReplica(rc *replicaConn) {
-	p := r.s.prop
+	p := r.server.propagator
 	p.mu.Lock()
 	delete(p.replicas, rc)
 	p.mu.Unlock()
@@ -389,7 +391,7 @@ func (r *replication) serveReplica(c *Client) {
 		rc.close()
 	}()
 	for {
-		args, err := c.r.ReadCommand()
+		args, err := c.reader.ReadCommand()
 		if err != nil {
 			return
 		}
@@ -403,7 +405,7 @@ func (r *replication) serveReplica(c *Client) {
 
 // waitReplicas implements WAIT.
 func (r *replication) waitReplicas(n int, timeoutMs int64) int {
-	p := r.s.prop
+	p := r.server.propagator
 	p.mu.Lock()
 	target := p.offset
 	reps := make([]*replicaConn, 0, len(p.replicas))
@@ -441,7 +443,7 @@ func (r *replication) waitReplicas(n int, timeoutMs int64) int {
 			return k
 		}
 		select {
-		case <-r.s.done:
+		case <-r.server.done:
 			return k
 		case <-time.After(5 * time.Millisecond):
 		}
@@ -451,10 +453,10 @@ func (r *replication) waitReplicas(n int, timeoutMs int64) int {
 // ---- replica side ----
 
 func cmdReplicaOf(c *Ctx) {
-	s := c.s
+	s := c.server
 	if c.Is(1, "no") && c.Is(2, "one") {
-		if s.repl.isReplica() {
-			s.repl.promote()
+		if s.replication.isReplica() {
+			s.replication.promote()
 		}
 		c.W.WriteOK()
 		return
@@ -463,7 +465,7 @@ func cmdReplicaOf(c *Ctx) {
 		c.Err("ERR Invalid master port")
 		return
 	}
-	s.repl.startReplica(c.Arg(1), c.Arg(2))
+	s.replication.startReplica(c.Arg(1), c.Arg(2))
 	c.W.WriteSimple("OK")
 }
 
@@ -477,12 +479,12 @@ func (r *replication) promote() {
 		_ = r.masterConn.Close() // best-effort: cleanup after failure or teardown
 	}
 	r.replID2 = r.replID
-	r.secondOff = r.s.prop.offsetValue() + 1
+	r.secondOffset = r.server.propagator.offsetValue() + 1
 	r.replID = randomHex(40)
 	r.mu.Unlock()
-	r.isRep.Store(false)
+	r.replicaMode.Store(false)
 	r.linkUp.Store(false)
-	r.s.log.Info("MASTER MODE enabled")
+	r.server.log.Info("MASTER MODE enabled")
 }
 
 func (p *propagator) offsetValue() int64 {
@@ -503,17 +505,17 @@ func (r *replication) startReplica(host, port string) {
 	r.stopCh = stop
 	r.masterHost, r.masterPort = host, port
 	r.mu.Unlock()
-	r.isRep.Store(true)
+	r.replicaMode.Store(true)
 	r.linkUp.Store(false)
 	r.linkState.Store("connect")
 	// Disconnect our own replicas: they must resync with the new history.
-	p := r.s.prop
+	p := r.server.propagator
 	p.mu.Lock()
 	for rc := range p.replicas {
 		rc.close()
 	}
 	p.mu.Unlock()
-	r.s.log.Info("connecting to MASTER", "host", host, "port", port)
+	r.server.log.Info("connecting to MASTER", "host", host, "port", port)
 	go r.linkLoop(host, port, stop)
 }
 
@@ -532,7 +534,7 @@ func (r *replication) linkLoop(host, port string, stop chan struct{}) {
 		default:
 		}
 		if err != nil {
-			r.s.log.Warn("replication link error, retrying", "err", err)
+			r.server.log.Warn("replication link error, retrying", "err", err)
 		}
 		r.linkState.Store("connect")
 		select {
@@ -571,7 +573,7 @@ func (r *replication) syncWithMaster(host, port string, stop chan struct{}) erro
 	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
 	br := resp.NewReader(conn, 64*1024)
 	br.MaxBulkLen = 1 << 62
-	if pass := r.s.cfg.MasterAuth(); pass != "" {
+	if pass := r.server.cfg.MasterAuth(); pass != "" {
 		line, err := r.sendCmd(conn, br, "AUTH", pass)
 		if err != nil {
 			return err
@@ -587,7 +589,7 @@ func (r *replication) syncWithMaster(host, port string, stop chan struct{}) erro
 	if strings.HasPrefix(line, "-NOAUTH") {
 		return errors.New("master requires authentication (set masterauth)")
 	}
-	if _, err := r.sendCmd(conn, br, "REPLCONF", "listening-port", strconv.Itoa(r.s.cfg.Port)); err != nil {
+	if _, err := r.sendCmd(conn, br, "REPLCONF", "listening-port", strconv.Itoa(r.server.cfg.Port)); err != nil {
 		return err
 	}
 	if _, err := r.sendCmd(conn, br, "REPLCONF", "capa", "eof", "capa", "psync2"); err != nil {
@@ -596,9 +598,9 @@ func (r *replication) syncWithMaster(host, port string, stop chan struct{}) erro
 	r.mu.Lock()
 	cachedID := r.replID
 	r.mu.Unlock()
-	cachedOff := r.s.prop.offsetValue()
+	cachedOff := r.server.propagator.offsetValue()
 	psyncID, psyncOff := "?", "-1"
-	if r.masterOff.Load() > 0 || cachedOff > 0 {
+	if r.masterOffset.Load() > 0 || cachedOff > 0 {
 		psyncID = cachedID
 		psyncOff = strconv.FormatInt(cachedOff+1, 10)
 	}
@@ -636,9 +638,9 @@ func (r *replication) syncWithMaster(host, port string, stop chan struct{}) erro
 		r.mu.Lock()
 		r.replID = f[1]
 		r.replID2 = ""
-		r.secondOff = -1
+		r.secondOffset = -1
 		r.mu.Unlock()
-		p := r.s.prop
+		p := r.server.propagator
 		p.mu.Lock()
 		p.offset = off
 		p.lastDB = -1
@@ -646,18 +648,18 @@ func (r *replication) syncWithMaster(host, port string, stop chan struct{}) erro
 			p.backlog = newBacklog(len(p.backlog.buf), off)
 		}
 		p.mu.Unlock()
-		r.masterOff.Store(off)
-		r.s.log.Info("MASTER <-> REPLICA sync: finished with success", "bytes", n)
+		r.masterOffset.Store(off)
+		r.server.log.Info("MASTER <-> REPLICA sync: finished with success", "bytes", n)
 	case strings.HasPrefix(line, "+CONTINUE"):
 		f := strings.Fields(line)
 		if len(f) == 2 && f[1] != cachedID {
 			r.mu.Lock()
 			r.replID2 = cachedID
-			r.secondOff = cachedOff + 1
+			r.secondOffset = cachedOff + 1
 			r.replID = f[1]
 			r.mu.Unlock()
 		}
-		r.s.log.Info("MASTER <-> REPLICA sync: partial resynchronization accepted")
+		r.server.log.Info("MASTER <-> REPLICA sync: partial resynchronization accepted")
 	default:
 		return errors.New("unexpected PSYNC reply: " + line)
 	}
@@ -670,12 +672,12 @@ func (r *replication) syncWithMaster(host, port string, stop chan struct{}) erro
 }
 
 func (r *replication) loadFromMaster(payload []byte) error {
-	s := r.s
-	s.ks.HoldSnapshots()
-	defer s.ks.ReleaseSnapshots()
-	s.ks.LockAll(true)
-	defer s.ks.UnlockAll(true)
-	s.ks.FlushAll()
+	s := r.server
+	s.keyspace.HoldSnapshots()
+	defer s.keyspace.ReleaseSnapshots()
+	s.keyspace.LockAll(true)
+	defer s.keyspace.UnlockAll(true)
+	s.keyspace.FlushAll()
 	_, err := s.loadSnapshot(bufio.NewReader(bytes.NewReader(payload)))
 	s.watches.touchDB(-1)
 	s.blocker.signalAll()
@@ -691,17 +693,17 @@ func (r *replication) sendAck() {
 	if conn == nil || !r.linkUp.Load() {
 		return
 	}
-	off := r.s.prop.offsetValue()
+	off := r.server.propagator.offsetValue()
 	ackMu.Lock()
 	_, _ = conn.Write(resp.AppendCommandStrings(nil, "REPLCONF", "ACK", strconv.FormatInt(off, 10)))
 	ackMu.Unlock()
 }
 
 func (r *replication) streamFromMaster(conn net.Conn, br *resp.Reader, stop chan struct{}) error {
-	s := r.s
+	s := r.server
 	mc := &Client{s: s, conn: conn, isMaster: true, proto: 2, unblockCh: make(chan int, 1), created: time.Now(), authed: true}
-	mc.w = resp.NewWriter(nil, 2)
-	mc.r = br
+	mc.writer = resp.NewWriter(nil, 2)
+	mc.reader = br
 	mc.name.Store("")
 	mc.libName.Store("")
 	mc.libVer.Store("")
@@ -747,7 +749,7 @@ func (r *replication) streamFromMaster(conn net.Conn, br *resp.Reader, stop chan
 		}
 		if name == "replconf" {
 			// GETACK must account for its own bytes before replying.
-			s.prop.feedRaw(raw, -1)
+			s.propagator.feedRaw(raw, -1)
 			if len(args) >= 2 && strings.EqualFold(string(args[1]), "getack") {
 				r.sendAck()
 			}
@@ -755,10 +757,10 @@ func (r *replication) streamFromMaster(conn net.Conn, br *resp.Reader, stop chan
 		}
 		if name != "ping" {
 			s.processCommand(mc, args)
-			mc.w.Reset()
+			mc.writer.Reset()
 		}
-		s.prop.feedRaw(raw, selectDB)
-		r.masterOff.Store(s.prop.offsetValue())
+		s.propagator.feedRaw(raw, selectDB)
+		r.masterOffset.Store(s.propagator.offsetValue())
 	}
 }
 
@@ -771,10 +773,10 @@ func (r *replication) writeRole(c *Ctx) {
 		c.W.WriteBulkString(r.masterHost)
 		c.W.WriteInt(int64(port))
 		c.W.WriteBulkString(state)
-		c.W.WriteInt(r.s.prop.offsetValue())
+		c.W.WriteInt(r.server.propagator.offsetValue())
 		return
 	}
-	p := r.s.prop
+	p := r.server.propagator
 	p.mu.Lock()
 	off := p.offset
 	var reps []*replicaConn
@@ -798,7 +800,7 @@ func (r *replication) writeRole(c *Ctx) {
 func (r *replication) infoSection() string {
 	var b strings.Builder
 	b.WriteString("# Replication\r\n")
-	p := r.s.prop
+	p := r.server.propagator
 	p.mu.Lock()
 	off := p.offset
 	var reps []*replicaConn
@@ -812,7 +814,7 @@ func (r *replication) infoSection() string {
 	}
 	p.mu.Unlock()
 	r.mu.Lock()
-	id, id2, second := r.replID, r.replID2, r.secondOff
+	id, id2, second := r.replID, r.replID2, r.secondOffset
 	r.mu.Unlock()
 	if id2 == "" {
 		id2 = strings.Repeat("0", 40)
@@ -825,7 +827,7 @@ func (r *replication) infoSection() string {
 		fmt.Fprintf(&b, "role:slave\r\nmaster_host:%s\r\nmaster_port:%s\r\nmaster_link_status:%s\r\n", r.masterHost, r.masterPort, link)
 		fmt.Fprintf(&b, "master_last_io_seconds_ago:%d\r\nmaster_sync_in_progress:%d\r\n", time.Now().Unix()-r.lastIO.Load(), b2i(r.syncing.Load()))
 		fmt.Fprintf(&b, "slave_read_repl_offset:%d\r\nslave_repl_offset:%d\r\nslave_priority:100\r\nslave_read_only:%d\r\nreplica_announced:1\r\n",
-			off, off, b2i(r.s.cfg.ReplicaReadOnly.Load()))
+			off, off, b2i(r.server.cfg.ReplicaReadOnly.Load()))
 	} else {
 		b.WriteString("role:master\r\n")
 	}

@@ -1,3 +1,5 @@
+// cjson and cmsgpack libraries as exposed to Redis scripts.
+
 package lua
 
 import (

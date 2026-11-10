@@ -1,3 +1,5 @@
+// Differential testing: run the same steps against DistCache and Redis and compare.
+
 package testutil
 
 import (

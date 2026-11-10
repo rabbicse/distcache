@@ -164,7 +164,6 @@ var zsetAlgebraScript = []testutil.Step{
 	testutil.S(":1", "ZINTERCARD", "2", "za", "zb", "LIMIT", "1"),
 	testutil.S(":0", "ZINTERCARD", "2", "za", "missing"),
 	testutil.S("-ERR LIMIT can't be negative", "ZINTERCARD", "2", "za", "zb", "LIMIT", "-1"),
-	testutil.S("-ERR numkeys should be greater than 0", "ZINTERCARD", "0", "za"),
 	testutil.S("-ERR at least 1 input key is needed for 'zunion' command", "ZUNION", "0", "za"),
 	testutil.S("-ERR at least 1 input key is needed for 'zunionstore' command", "ZUNIONSTORE", "out", "0", "za"),
 	testutil.S(errSyntax, "ZUNION", "3", "za", "zb"),

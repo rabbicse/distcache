@@ -1,3 +1,5 @@
+// Sorted set commands.
+
 package server
 
 import (
@@ -1128,8 +1130,12 @@ func cmdZDiffStore(c *Ctx)  { zsetOpGeneric(c, 2, true) }
 
 func cmdZInterCard(c *Ctx) {
 	n, ok := parseInt(c.Args[1])
-	if !ok || n <= 0 {
-		c.Err("ERR numkeys should be greater than 0")
+	if !ok {
+		c.Err(errNotInt)
+		return
+	}
+	if n <= 0 {
+		c.Err("ERR at least 1 input key is needed for 'zintercard' command")
 		return
 	}
 	if n > int64(len(c.Args)-2) {

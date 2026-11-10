@@ -1,0 +1,31 @@
+go test -run '^$' -bench . -benchmem ./internal/server ./internal/resp ./internal/storage
+goos: darwin
+goarch: arm64
+pkg: github.com/rabbicse/distcache/internal/server
+cpu: Apple M1
+BenchmarkExecGet-8             	 1000000	      1027 ns/op	     464 B/op	      13 allocs/op
+BenchmarkExecSet-8             	  911709	      1449 ns/op	     719 B/op	      20 allocs/op
+BenchmarkProcessCommandGet-8   	 1615218	       742.9 ns/op	     392 B/op	       9 allocs/op
+BenchmarkParallelGet-8         	 2695357	       453.9 ns/op	     496 B/op	      14 allocs/op
+BenchmarkParallelSet-8         	 1743388	       705.5 ns/op	     768 B/op	      21 allocs/op
+BenchmarkParallelHotKeyGet-8   	 2581906	       518.1 ns/op	     496 B/op	      14 allocs/op
+BenchmarkPipeline16-8          	  360699	      3214 ns/op	     456 B/op	      13 allocs/op
+PASS
+ok  	github.com/rabbicse/distcache/internal/server	11.918s
+goos: darwin
+goarch: arm64
+pkg: github.com/rabbicse/distcache/internal/resp
+cpu: Apple M1
+BenchmarkReadCommand-8   	 6725707	       168.7 ns/op	 266.82 MB/s	     114 B/op	       4 allocs/op
+BenchmarkWriteBulk-8     	61334538	        19.81 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/rabbicse/distcache/internal/resp	2.763s
+goos: darwin
+goarch: arm64
+pkg: github.com/rabbicse/distcache/internal/storage
+cpu: Apple M1
+BenchmarkShardOf-8   	133395961	         8.940 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookup-8    	 6306812	       190.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSet-8       	 5643087	       212.1 ns/op	      72 B/op	       2 allocs/op
+PASS
+ok  	github.com/rabbicse/distcache/internal/storage	4.002s

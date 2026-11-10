@@ -1,3 +1,5 @@
+// String commands: GET, SET and variants, counters, ranges.
+
 package server
 
 import (
@@ -596,7 +598,7 @@ func cmdLCS(c *Ctx) {
 		return
 	}
 	alen, blen := len(a), len(b)
-	if uint64(alen+1)*uint64(blen+1)*4 > uint64(c.s.cfg.ProtoMaxBulkLen.Load()) {
+	if uint64(alen+1)*uint64(blen+1)*4 > uint64(c.server.cfg.ProtoMaxBulkLen.Load()) {
 		c.Err("ERR Insufficient memory, transient memory for LCS exceeds proto-max-bulk-len")
 		return
 	}

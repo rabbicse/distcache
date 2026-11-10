@@ -1,3 +1,5 @@
+// Small shared helpers used across command handlers.
+
 package server
 
 import (

@@ -1,3 +1,5 @@
+// Sorted set value type: a Redis-style skiplist plus a member->score dict.
+
 package ds
 
 import (

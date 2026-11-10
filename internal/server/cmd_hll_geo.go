@@ -1,3 +1,5 @@
+// HyperLogLog (PF*) and GEO commands.
+
 package server
 
 import (
@@ -53,6 +55,11 @@ func (c *Ctx) getHLL(key string) (*ds.HLL, bool) {
 	return h, true
 }
 
+// hllSparseMax returns hll-sparse-max-bytes, clamped to int.
+func (c *Ctx) hllSparseMax() int {
+	return int(min(c.server.cfg.HLLSparseMaxBytes.Load(), math.MaxInt32))
+}
+
 func cmdPFAdd(c *Ctx) {
 	key := c.Arg(1)
 	v, ok := c.getHLLString(key)
@@ -68,9 +75,10 @@ func cmdPFAdd(c *Ctx) {
 	} else {
 		b = slices.Clone(v)
 	}
+	sparseMax := c.hllSparseMax()
 	for _, el := range c.Args[2:] {
 		var r int
-		b, r = ds.HLLAdd(b, el)
+		b, r = ds.HLLAdd(b, el, sparseMax)
 		switch r {
 		case -1:
 			c.Err(errInvalidHLL)
@@ -109,7 +117,9 @@ func cmdPFCount(c *Ctx) {
 			c.Err(errInvalidHLL)
 			return
 		}
-		c.W.WriteInt(int64(h.Count()))
+		n := h.Count()
+		c.cacheHLLCount(c.Arg(1), v, n)
+		c.W.WriteInt(int64(n))
 		return
 	}
 	acc := &ds.HLL{}
@@ -123,6 +133,31 @@ func cmdPFCount(c *Ctx) {
 		}
 	}
 	c.W.WriteInt(int64(acc.Count()))
+}
+
+// cacheHLLCount stores the cardinality n just computed for the HLL v at key
+// in its header, as pfcountCommand does, so GET after PFCOUNT returns the
+// same bytes as Redis. On a master it counts as a change and propagates the
+// PFCOUNT, like Redis. On a replica (other than for the master link) the
+// header is still updated but nothing is marked dirty: Redis's
+// replicationFeedSlaves returns early there, and propagating would advance
+// the replica's offset past its master's and feed sub-replicas a command the
+// master never sent. Writing needs write locks on key; the top-level PFCOUNT
+// (FlagExclusive) and EXEC take them. Commands run from a script have
+// writeLocked false, so a scripted PFCOUNT leaves the cache invalid.
+func (c *Ctx) cacheHLLCount(key string, v []byte, n uint64) {
+	if !c.writeLocked {
+		return
+	}
+	c.DB.Preserve(key)
+	// Work on a copy: the stored slice may be shared with a snapshot.
+	b := slices.Clone(v)
+	ds.HLLSetCachedCount(b, n)
+	c.DB.SetValue(key, b, true)
+	if c.server.replication.isReplica() && !c.isMaster {
+		return
+	}
+	c.Dirty(1)
 }
 
 // cmdPFMerge follows Redis's pfmergeCommand: the destination stays sparse
@@ -163,9 +198,10 @@ func cmdPFMerge(c *Ctx) {
 		}
 		ds.HLLWriteDense(b, acc)
 	} else {
+		sparseMax := c.hllSparseMax()
 		for i, r := range acc.Reg {
 			if r != 0 {
-				b, _ = ds.HLLSet(b, i, r) // b was validated, so -1 cannot occur
+				b, _ = ds.HLLSet(b, i, r, sparseMax) // b was validated, so -1 cannot occur
 			}
 		}
 	}
@@ -189,24 +225,6 @@ func unitFactor(u string) (float64, bool) {
 		return 1609.34, true
 	}
 	return 0, false
-}
-
-func formatHuman(f float64) string {
-	s := strconv.FormatFloat(f, 'f', 17, 64)
-	s = strings.TrimRight(s, "0")
-	s = strings.TrimSuffix(s, ".")
-	if s == "-0" {
-		s = "0"
-	}
-	return s
-}
-
-func writeHumanDouble(w *resp.Writer, f float64) {
-	if w.Proto >= 3 {
-		w.WriteRaw([]byte("," + formatHuman(f) + "\r\n"))
-		return
-	}
-	w.WriteBulkString(formatHuman(f))
 }
 
 func writeDistance(w *resp.Writer, d float64) {
@@ -321,8 +339,8 @@ func cmdGeoPos(c *Ctx) {
 		}
 		lon, lat := ds.GeoDecode(uint64(s))
 		c.W.WriteArrayLen(2)
-		writeHumanDouble(c.W, lon)
-		writeHumanDouble(c.W, lat)
+		c.W.WriteDouble(lon)
+		c.W.WriteDouble(lat)
 	}
 }
 
@@ -447,14 +465,23 @@ func (c *Ctx) parseGeoOpts(q *geoQuery, i int, storeAllowed bool) bool {
 			q.storeDist = true
 		case q.searchSyntax && c.Is(i, "frommember") && left >= 1:
 			q.fromMember = c.Arg(i + 1)
-			if q.hasMember || q.hasLonLat {
+			if q.hasLonLat {
+				// Redis rejects mixing the two origins as a syntax error.
+				c.SyntaxErr()
+				return false
+			}
+			if q.hasMember {
 				c.Err("ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for " + strings.ToUpper(c.Cmd.Name))
 				return false
 			}
 			q.hasMember = true
 			i++
 		case q.searchSyntax && c.Is(i, "fromlonlat") && left >= 2:
-			if q.hasMember || q.hasLonLat {
+			if q.hasMember {
+				c.SyntaxErr()
+				return false
+			}
+			if q.hasLonLat {
 				c.Err("ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for " + strings.ToUpper(c.Cmd.Name))
 				return false
 			}
@@ -534,7 +561,7 @@ func (c *Ctx) parseGeoOpts(q *geoQuery, i int, storeAllowed bool) bool {
 	}
 	if (q.hasStore || (q.searchSyntax && q.store != "")) && (q.withDist || q.withHash || q.withCoord) {
 		if q.searchSyntax {
-			c.Err("ERR WITHDIST, WITHHASH and WITHCOORD options are not compatible with GEOSEARCHSTORE")
+			c.Err("ERR GEOSEARCHSTORE is not compatible with WITHDIST, WITHHASH and WITHCOORD options")
 		} else {
 			c.Err("ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options")
 		}
@@ -639,8 +666,8 @@ func (c *Ctx) geoExecute(q *geoQuery, srcKey string) {
 		}
 		if q.withCoord {
 			c.W.WriteArrayLen(2)
-			writeHumanDouble(c.W, p.lon)
-			writeHumanDouble(c.W, p.lat)
+			c.W.WriteDouble(p.lon)
+			c.W.WriteDouble(p.lat)
 		}
 	}
 }

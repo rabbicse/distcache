@@ -1,5 +1,7 @@
 //go:build unix
 
+// cpuTimes via getrusage for INFO used_cpu_*.
+
 package server
 
 import "syscall"

@@ -1,3 +1,5 @@
+// Set commands.
+
 package server
 
 import (

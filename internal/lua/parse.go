@@ -1,3 +1,5 @@
+// Recursive-descent parser producing the Lua AST.
+
 package lua
 
 // ---- AST ----

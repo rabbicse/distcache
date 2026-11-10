@@ -1,3 +1,5 @@
+// Ordered propagation of write effects to the AOF, backlog and replicas.
+
 package server
 
 import (
@@ -22,8 +24,8 @@ import (
 // locks, so commands touching the same key are always logged in execution
 // order.
 type propagator struct {
-	s  *Server
-	mu sync.Mutex
+	server *Server
+	mu     sync.Mutex
 
 	lastDB int
 	offset int64 // master_repl_offset
@@ -44,7 +46,7 @@ type propagator struct {
 }
 
 func newPropagator(s *Server) *propagator {
-	return &propagator{s: s, lastDB: -1, replicas: map[*replicaConn]struct{}{},
+	return &propagator{server: s, lastDB: -1, replicas: map[*replicaConn]struct{}{},
 		aofSignal: make(chan struct{}, 1), writerDone: make(chan struct{})}
 }
 
@@ -58,7 +60,7 @@ var (
 )
 
 // propagate encodes and distributes commands. wrap forces MULTI/EXEC.
-func (p *propagator) propagate(cmds []propCmd, wrap bool) {
+func (p *propagator) propagate(cmds []propagatedCommand, wrap bool) {
 	if len(cmds) == 0 {
 		return
 	}
@@ -126,7 +128,7 @@ func (p *propagator) feedLocked(buf []byte) {
 // ---- AOF ----
 
 func (p *propagator) aofPath() string {
-	return filepath.Join(p.s.cfg.Dir, p.s.cfg.AppendFilename)
+	return filepath.Join(p.server.cfg.Dir, p.server.cfg.AppendFilename)
 }
 
 func (p *propagator) openAOF() error {
@@ -150,7 +152,7 @@ func (p *propagator) openAOF() error {
 }
 
 func (p *propagator) writeAOF(buf []byte) {
-	if p.s.cfg.AppendFsync == "always" {
+	if p.server.cfg.AppendFsync == "always" {
 		if len(p.aofBuf) > 0 {
 			p.flushAOFLocked()
 		}
@@ -176,7 +178,7 @@ func (p *propagator) flushAOFLocked() {
 	p.aofSize += int64(n)
 	if err != nil {
 		p.aofErr = err
-		p.s.log.Warn("error writing to the AOF file", "err", err)
+		p.server.log.Warn("error writing to the AOF file", "err", err)
 	}
 	if cap(p.aofBuf) > 4<<20 {
 		p.aofBuf = nil
@@ -192,7 +194,7 @@ func (p *propagator) aofWriter() {
 	defer t.Stop()
 	for {
 		select {
-		case <-p.s.done:
+		case <-p.server.done:
 			return
 		case <-p.aofSignal:
 			p.mu.Lock()
@@ -202,7 +204,7 @@ func (p *propagator) aofWriter() {
 			p.mu.Lock()
 			p.flushAOFLocked()
 			f := p.aofFile
-			fsync := p.s.cfg.AppendFsync == "everysec"
+			fsync := p.server.cfg.AppendFsync == "everysec"
 			p.mu.Unlock()
 			if f != nil && fsync {
 				_ = f.Sync()
@@ -233,11 +235,11 @@ func (p *propagator) aofStats() (size int64, enabled bool, err error) {
 // rewriteAOF builds a compact AOF: a point-in-time snapshot preamble
 // followed by the commands executed while it was being written.
 func (s *Server) rewriteAOF() error {
-	if !s.aofRewr.CompareAndSwap(false, true) {
+	if !s.aofRewriting.CompareAndSwap(false, true) {
 		return errors.New("Background append only file rewriting already in progress")
 	}
-	defer s.aofRewr.Store(false)
-	p := s.prop
+	defer s.aofRewriting.Store(false)
+	p := s.propagator
 	dir := s.cfg.Dir
 	tmp := filepath.Join(dir, fmt.Sprintf("temp-rewriteaof-%d.aof", time.Now().UnixNano()))
 	f, err := os.Create(tmp)
@@ -245,17 +247,17 @@ func (s *Server) rewriteAOF() error {
 		s.stats.lastAofRewriteOK.Store(false)
 		return err
 	}
-	s.ks.BeginSnapshot(func() {
+	s.keyspace.BeginSnapshot(func() {
 		p.mu.Lock()
 		p.rewrite = &bytes.Buffer{}
 		p.lastDB = -1
 		p.mu.Unlock()
 	})
 	enc := storage.NewEncoder(f)
-	for i := 0; i < s.ks.NumShards(); i++ {
-		s.ks.SnapshotShard(i, func(db int, key string, e *storage.Entry) { enc.WriteEntry(db, key, e) })
+	for i := 0; i < s.keyspace.NumShards(); i++ {
+		s.keyspace.SnapshotShard(i, func(db int, key string, e *storage.Entry) { enc.WriteEntry(db, key, e) })
 	}
-	s.ks.EndSnapshot()
+	s.keyspace.EndSnapshot()
 	for _, code := range s.scripts.libraryCodes() {
 		enc.WriteAux("function", []byte(code))
 	}
@@ -352,7 +354,7 @@ func (s *Server) loadAOF(path string) error {
 		}
 	}
 	fake := &Client{s: s, isMaster: true, proto: 2}
-	fake.w = resp.NewWriter(nil, 2)
+	fake.writer = resp.NewWriter(nil, 2)
 	fake.name.Store("aof-loader")
 	fake.lastCmd.Store("")
 	r := resp.NewReader(br, 1<<16)
@@ -386,7 +388,7 @@ func (s *Server) loadAOF(path string) error {
 			inMulti = false
 		}
 		s.processCommand(fake, args)
-		fake.w.Reset()
+		fake.writer.Reset()
 		cmds++
 	}
 	if inMulti {

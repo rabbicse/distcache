@@ -25,10 +25,10 @@ cover:
 	go tool cover -html=coverage.out -o coverage.html
 
 bench:
-	./bench/run.sh
+	./scripts/bench.sh
 
 microbench:
-	@echo "added in Task 16"
+	go test -run '^$$' -bench . -benchmem ./internal/server ./internal/resp ./internal/storage
 
 docker:
-	docker build -t distcache:dev .
+	docker build -f deploy/docker/Dockerfile -t distcache:dev .

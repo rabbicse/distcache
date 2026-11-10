@@ -1,3 +1,5 @@
+// Command table registration and COMMAND introspection.
+
 package server
 
 import (
@@ -7,19 +9,22 @@ import (
 	"github.com/rabbicse/distcache/internal/config"
 )
 
-type regSpec struct {
+// commandSpec is one command-table row; addCommand turns it into a *Command.
+// The flag string and key positions drive locking and propagation, so they
+// must match Redis exactly.
+type commandSpec struct {
 	name        string
 	arity       int
 	flags       string
 	first, last int
 	step        int
 	group       string
-	h           Handler
+	handler     Handler
 	keys        KeysFunc
 }
 
 func (s *Server) registerCommands() {
-	specs := []regSpec{
+	specs := []commandSpec{
 		// strings
 		{"get", 2, "readonly fast", 1, 1, 1, "string", cmdGet, nil},
 		{"set", -3, "write denyoom", 1, 1, 1, "string", cmdSet, nil},
@@ -207,7 +212,7 @@ func (s *Server) registerCommands() {
 		{"xinfo", -2, "readonly", 2, 2, 1, "stream", cmdXInfo, nil},
 		// hyperloglog
 		{"pfadd", -2, "write denyoom fast", 1, 1, 1, "hyperloglog", cmdPFAdd, nil},
-		{"pfcount", -2, "readonly", 1, -1, 1, "hyperloglog", cmdPFCount, nil},
+		{"pfcount", -2, "readonly may_replicate exclusive", 1, -1, 1, "hyperloglog", cmdPFCount, nil},
 		{"pfmerge", -2, "write denyoom", 1, -1, 1, "hyperloglog", cmdPFMerge, nil},
 		// geo
 		{"geoadd", -5, "write denyoom", 1, 1, 1, "geo", cmdGeoAdd, nil},
@@ -237,12 +242,12 @@ func (s *Server) registerCommands() {
 		{"watch", -2, "noscript loading stale fast allow_busy txctl", 1, -1, 1, "transaction", cmdWatch, nil},
 		{"unwatch", 1, "noscript loading stale fast allow_busy txctl", 0, 0, 0, "transaction", cmdUnwatch, nil},
 		// scripting
-		{"eval", -3, "noscript skip_monitor may_replicate lockall", 0, 0, 0, "scripting", cmdEval, numKeysAt(2)},
-		{"evalsha", -3, "noscript skip_monitor may_replicate lockall", 0, 0, 0, "scripting", cmdEvalSha, numKeysAt(2)},
+		{"eval", -3, "noscript skip_monitor may_replicate lockall exclusive", 0, 0, 0, "scripting", cmdEval, numKeysAt(2)},
+		{"evalsha", -3, "noscript skip_monitor may_replicate lockall exclusive", 0, 0, 0, "scripting", cmdEvalSha, numKeysAt(2)},
 		{"eval_ro", -3, "noscript skip_monitor readonly lockall", 0, 0, 0, "scripting", cmdEvalRO, numKeysAt(2)},
 		{"evalsha_ro", -3, "noscript skip_monitor readonly lockall", 0, 0, 0, "scripting", cmdEvalShaRO, numKeysAt(2)},
 		{"script", -2, "noscript allow_busy", 0, 0, 0, "scripting", cmdScript, nil},
-		{"fcall", -3, "noscript skip_monitor may_replicate lockall", 0, 0, 0, "scripting", cmdFCall, numKeysAt(2)},
+		{"fcall", -3, "noscript skip_monitor may_replicate lockall exclusive", 0, 0, 0, "scripting", cmdFCall, numKeysAt(2)},
 		{"fcall_ro", -3, "noscript skip_monitor readonly lockall", 0, 0, 0, "scripting", cmdFCallRO, numKeysAt(2)},
 		{"function", -2, "noscript may_replicate allow_busy", 0, 0, 0, "scripting", cmdFunction, nil},
 		// connection
@@ -290,26 +295,26 @@ func (s *Server) registerCommands() {
 		"geo": config.NotifyZSet,
 	}
 	renamed := s.cfg.Renamed()
-	s.cmds = make(map[string]*Command, len(specs))
+	s.commands = make(map[string]*Command, len(specs))
 	for _, sp := range specs {
 		s.addCommand(sp, renamed, notifyClass)
 	}
-	s.cmds["config"].Subs = []string{"get", "set", "resetstat", "rewrite", "help"}
-	s.cmds["client"].Subs = []string{"id", "getname", "setname", "setinfo", "info", "list", "kill", "pause", "unpause", "reply", "no-evict", "no-touch", "unblock", "help"}
-	s.cmds["object"].Subs = []string{"encoding", "freq", "idletime", "refcount", "help"}
-	s.cmds["xgroup"].Subs = []string{"create", "setid", "destroy", "createconsumer", "delconsumer", "help"}
-	s.cmds["xinfo"].Subs = []string{"stream", "groups", "consumers", "help"}
-	s.cmds["script"].Subs = []string{"load", "exists", "flush", "kill", "help"}
-	s.cmds["function"].Subs = []string{"load", "list", "delete", "flush", "dump", "restore", "stats", "kill", "help"}
+	s.commands["config"].Subs = []string{"get", "set", "resetstat", "rewrite", "help"}
+	s.commands["client"].Subs = []string{"id", "getname", "setname", "setinfo", "info", "list", "kill", "pause", "unpause", "reply", "no-evict", "no-touch", "unblock", "help"}
+	s.commands["object"].Subs = []string{"encoding", "freq", "idletime", "refcount", "help"}
+	s.commands["xgroup"].Subs = []string{"create", "setid", "destroy", "createconsumer", "delconsumer", "help"}
+	s.commands["xinfo"].Subs = []string{"stream", "groups", "consumers", "help"}
+	s.commands["script"].Subs = []string{"load", "exists", "flush", "kill", "help"}
+	s.commands["function"].Subs = []string{"load", "list", "delete", "flush", "dump", "restore", "stats", "kill", "help"}
 }
 
 // addCommand builds a Command from sp and adds it to the command table,
 // honouring rename-command (an empty new name disables the command). It is
 // not safe for concurrent use: call it only while no client is executing.
-func (s *Server) addCommand(sp regSpec, renamed map[string]string, notifyClass map[string]int64) {
+func (s *Server) addCommand(sp commandSpec, renamed map[string]string, notifyClass map[string]int64) {
 	cmd := &Command{
 		Name: sp.name, Arity: sp.arity, Flags: parseFlags(sp.flags), First: sp.first, Last: sp.last,
-		Step: sp.step, Group: sp.group, Handler: sp.h, Keys: sp.keys,
+		Step: sp.step, Group: sp.group, Handler: sp.handler, Keys: sp.keys,
 	}
 	if cmd.Has(FlagWrite) {
 		cmd.NotifyClass = notifyClass[sp.group]
@@ -322,7 +327,7 @@ func (s *Server) addCommand(sp regSpec, renamed map[string]string, notifyClass m
 		}
 		name = strings.ToLower(nn)
 	}
-	s.cmds[name] = cmd
+	s.commands[name] = cmd
 }
 
 var flagWire = []struct {
@@ -399,18 +404,18 @@ func (c *Ctx) writeCommandInfo(cmd *Command) {
 }
 
 func cmdCommand(c *Ctx) {
-	s := c.s
+	s := c.server
 	if len(c.Args) == 1 {
 		names := s.sortedCommandNames()
 		c.W.WriteArrayLen(len(names))
 		for _, n := range names {
-			c.writeCommandInfo(s.cmds[n])
+			c.writeCommandInfo(s.commands[n])
 		}
 		return
 	}
 	switch strings.ToLower(c.Arg(1)) {
 	case "count":
-		c.W.WriteInt(int64(len(s.cmds)))
+		c.W.WriteInt(int64(len(s.commands)))
 	case "info":
 		names := argStrings(c.Args[2:])
 		if len(names) == 0 {
@@ -418,7 +423,7 @@ func cmdCommand(c *Ctx) {
 		}
 		c.W.WriteArrayLen(len(names))
 		for _, n := range names {
-			if cmd := s.cmds[strings.ToLower(n)]; cmd != nil {
+			if cmd := s.commands[strings.ToLower(n)]; cmd != nil {
 				c.writeCommandInfo(cmd)
 			} else {
 				c.W.WriteNullArray()
@@ -431,7 +436,7 @@ func cmdCommand(c *Ctx) {
 		}
 		var found []*Command
 		for _, n := range names {
-			if cmd := s.cmds[strings.ToLower(n)]; cmd != nil {
+			if cmd := s.commands[strings.ToLower(n)]; cmd != nil {
 				found = append(found, cmd)
 			}
 		}
@@ -452,7 +457,7 @@ func cmdCommand(c *Ctx) {
 			var out []string
 			val := strings.ToLower(c.Arg(4))
 			for _, n := range names {
-				cmd := s.cmds[n]
+				cmd := s.commands[n]
 				switch strings.ToLower(c.Arg(3)) {
 				case "aclcat":
 					if cmd.Group == strings.TrimPrefix(val, "@") {
@@ -479,7 +484,7 @@ func cmdCommand(c *Ctx) {
 			c.WrongSubArgs()
 			return
 		}
-		cmd := s.cmds[strings.ToLower(c.Arg(2))]
+		cmd := s.commands[strings.ToLower(c.Arg(2))]
 		if cmd == nil {
 			c.Err("ERR Invalid command specified")
 			return
@@ -526,8 +531,8 @@ func cmdCommand(c *Ctx) {
 }
 
 func (s *Server) sortedCommandNames() []string {
-	names := make([]string, 0, len(s.cmds))
-	for n := range s.cmds {
+	names := make([]string, 0, len(s.commands))
+	for n := range s.commands {
 		names = append(names, n)
 	}
 	sort.Strings(names)

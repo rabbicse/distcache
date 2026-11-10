@@ -47,6 +47,7 @@ type lexer struct {
 // SyntaxError is a compile error.
 type SyntaxError struct{ Msg string }
 
+// Error returns the compile error message.
 func (e *SyntaxError) Error() string { return e.Msg }
 
 func (lx *lexer) errf(line int, near string, format string, args ...any) {

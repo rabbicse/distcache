@@ -1,3 +1,5 @@
+// Entry point for distcache-bench: flag parsing and wiring to the runner.
+
 package main
 
 import (
@@ -9,6 +11,7 @@ import (
 	"time"
 )
 
+// main runs realMain and exits non-zero on error.
 func main() {
 	if err := realMain(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "distcache-bench:", err)

@@ -1,3 +1,5 @@
+// Snapshot (SAVE/BGSAVE), AOF loading, rewriting and startup recovery.
+
 package server
 
 import (
@@ -21,8 +23,8 @@ func (s *Server) loadData() error {
 	defer s.loading.Store(false)
 	start := time.Now()
 	if s.cfg.AppendOnly.Load() {
-		if _, err := os.Stat(s.prop.aofPath()); err == nil {
-			if err := s.loadAOF(s.prop.aofPath()); err != nil {
+		if _, err := os.Stat(s.propagator.aofPath()); err == nil {
+			if err := s.loadAOF(s.propagator.aofPath()); err != nil {
 				return err
 			}
 			s.log.Info("dataset loaded", "source", "aof", "seconds", time.Since(start).Seconds())
@@ -59,15 +61,15 @@ func (s *Server) loadSnapshot(r *bufio.Reader) (int, error) {
 // loadKey inserts a decoded key; caller must ensure exclusive access (startup
 // or all shards locked). Already expired keys are skipped on masters.
 func (s *Server) loadKey(db int, key string, v any, exp int64) bool {
-	if db >= s.ks.NumDB {
+	if db >= s.keyspace.NumDB {
 		return false
 	}
 	now := s.Now().UnixMilli()
-	if exp != 0 && exp <= now && !s.repl.isReplica() {
+	if exp != 0 && exp <= now && !s.replication.isReplica() {
 		return false
 	}
-	d := storage.DB{KS: s.ks, Idx: db, Now: now, Write: true}
-	e := s.ks.NewEntry(v)
+	d := storage.DB{KS: s.keyspace, Idx: db, Now: now, Write: true}
+	e := s.keyspace.NewEntry(v)
 	e.ExpireAt = exp
 	d.Set(key, e)
 	return true
@@ -76,12 +78,12 @@ func (s *Server) loadKey(db int, key string, v any, exp int64) bool {
 // writeSnapshot writes a point-in-time snapshot to w. cut runs at the
 // snapshot instant with all shards locked.
 func (s *Server) writeSnapshot(w io.Writer, cut func()) error {
-	s.ks.BeginSnapshot(cut)
+	s.keyspace.BeginSnapshot(cut)
 	enc := storage.NewEncoder(w)
-	for i := 0; i < s.ks.NumShards(); i++ {
-		s.ks.SnapshotShard(i, func(db int, key string, e *storage.Entry) { enc.WriteEntry(db, key, e) })
+	for i := 0; i < s.keyspace.NumShards(); i++ {
+		s.keyspace.SnapshotShard(i, func(db int, key string, e *storage.Entry) { enc.WriteEntry(db, key, e) })
 	}
-	s.ks.EndSnapshot()
+	s.keyspace.EndSnapshot()
 	for _, code := range s.scripts.libraryCodes() {
 		enc.WriteAux("function", []byte(code))
 	}

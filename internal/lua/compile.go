@@ -1,3 +1,5 @@
+// Compiler from the parsed AST to Go closures executed by the VM.
+
 package lua
 
 import "fmt"

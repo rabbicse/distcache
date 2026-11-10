@@ -1,3 +1,5 @@
+// Stream commands: XADD, XRANGE, XREAD, consumer groups and trimming.
+
 package server
 
 import (
@@ -605,7 +607,7 @@ func xreadGeneric(c *Ctx, group bool) {
 		name = "xreadgroup"
 	}
 	if rest%2 != 0 {
-		c.Err("ERR Unbalanced '" + name + "' list of streams: for each stream key an ID or '$' must be specified.")
+		c.Err("ERR Unbalanced '" + name + "' list of streams: for each stream key an ID, '+', or '$' must be specified.")
 		return
 	}
 	if group && groupName == "" {

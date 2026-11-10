@@ -1,3 +1,5 @@
+// Command descriptors, flags and the per-invocation Ctx passed to handlers.
+
 package server
 
 import (
@@ -16,21 +18,37 @@ import (
 type Flag uint64
 
 const (
+	// FlagWrite marks a command that may modify the dataset (write shard locks, propagation).
 	FlagWrite Flag = 1 << iota
+	// FlagReadonly marks a command that only reads data (read shard locks).
 	FlagReadonly
+	// FlagDenyOOM rejects the command with OOM when maxmemory is exceeded after eviction.
 	FlagDenyOOM
+	// FlagAdmin marks administrative commands (CONFIG, DEBUG, SHUTDOWN ...).
 	FlagAdmin
+	// FlagPubSub marks Pub/Sub commands, which are allowed in subscribed RESP2 context.
 	FlagPubSub
+	// FlagNoScript forbids the command inside Lua scripts and functions.
 	FlagNoScript
+	// FlagBlocking marks a command that may block the client (BLPOP, XREAD BLOCK ...).
 	FlagBlocking
+	// FlagLoading allows the command while the dataset is loading.
 	FlagLoading
+	// FlagStale allows the command on a replica with a stale link to its master.
 	FlagStale
+	// FlagSkipMonitor hides the command from MONITOR output.
 	FlagSkipMonitor
+	// FlagSkipSlowlog excludes the command from the slow log.
 	FlagSkipSlowlog
+	// FlagFast marks an O(1) or O(log N) command (Redis "fast").
 	FlagFast
+	// FlagNoAuth allows the command before the client has authenticated.
 	FlagNoAuth
+	// FlagMayReplicate marks a command that may propagate effects although not a write.
 	FlagMayReplicate
+	// FlagNoMulti forbids queueing the command inside MULTI.
 	FlagNoMulti
+	// FlagAllowBusy allows the command while a script is running (BUSY state).
 	FlagAllowBusy
 	// FlagGlobal: the handler walks the whole keyspace and locks shards
 	// itself when executed standalone (KEYS, SCAN, RANDOMKEY ...).
@@ -42,6 +60,10 @@ const (
 	FlagTxControl
 	// FlagNoPropagate: never written to AOF/replicas even if dirty.
 	FlagNoPropagate
+	// FlagExclusive takes write shard locks for a command that is not a
+	// write: PFCOUNT stores the cardinality it computes in the HLL header.
+	// It is internal and not reported by COMMAND INFO.
+	FlagExclusive
 )
 
 var flagNames = map[string]Flag{
@@ -50,7 +72,7 @@ var flagNames = map[string]Flag{
 	"stale": FlagStale, "skip_monitor": FlagSkipMonitor, "skip_slowlog": FlagSkipSlowlog, "fast": FlagFast,
 	"no_auth": FlagNoAuth, "may_replicate": FlagMayReplicate, "no_multi": FlagNoMulti,
 	"allow_busy": FlagAllowBusy, "global": FlagGlobal, "lockall": FlagLockAll, "txctl": FlagTxControl,
-	"noprop": FlagNoPropagate,
+	"noprop": FlagNoPropagate, "exclusive": FlagExclusive,
 }
 
 // Handler executes a command.
@@ -119,23 +141,26 @@ func parseFlags(s string) Flag {
 
 // Ctx carries everything a handler needs.
 type Ctx struct {
-	s    *Server
-	cl   *Client
-	Cmd  *Command
-	Args [][]byte
-	W    *resp.Writer
-	DB   *storage.DB
+	server *Server
+	client *Client
+	Cmd    *Command
+	Args   [][]byte
+	W      *resp.Writer
+	DB     *storage.DB
 
-	unit  *execUnit
+	unit  *executionUnit
 	dirty int64
 	// prop replaces the propagated commands when set.
 	prop     [][][]byte
 	propSet  bool
 	keys     []string
 	allLocks bool // every shard is already locked (EXEC/script)
-	inMulti  bool
-	inScript bool
-	isMaster bool // replication stream from our master
+	// writeLocked reports that the shard locks held for this command are
+	// write locks, so a non-write command (FlagExclusive) may mutate values.
+	writeLocked bool
+	inMulti     bool
+	inScript    bool
+	isMaster    bool // replication stream from our master
 
 	// blocking support
 	canBlock        bool
@@ -156,15 +181,20 @@ func (c *Ctx) NowMs() int64 { return c.DB.Now }
 // NowTime returns NowMs as a time.Time.
 func (c *Ctx) NowTime() time.Time { return time.UnixMilli(c.DB.Now) }
 
-// execUnit groups propagation for one atomic execution (command, EXEC,
+// executionUnit groups propagation for one atomic execution (command, EXEC,
 // script) so it is written to AOF/replicas as a single block.
-type execUnit struct {
-	db     int
-	cmds   []propCmd
-	writes int
+type executionUnit struct {
+	db       int
+	commands []propagatedCommand
+	writes   int
+	// writeLocked is set by EXEC when it took write locks, so the queued
+	// commands' contexts know they may mutate (see Ctx.writeLocked).
+	writeLocked bool
 }
 
-type propCmd struct {
+// propagatedCommand is one command queued in an executionUnit together with
+// the database it must be replayed in.
+type propagatedCommand struct {
 	db   int
 	args [][]byte
 }
@@ -354,9 +384,9 @@ func (c *Ctx) Lookup(key string) *storage.Entry {
 	e := c.DB.Lookup(key)
 	if c.Cmd.Has(FlagReadonly) && !c.inScript {
 		if e == nil {
-			c.s.stats.keyspaceMisses.Add(1)
+			c.server.stats.keyspaceMisses.Add(1)
 		} else {
-			c.s.stats.keyspaceHits.Add(1)
+			c.server.stats.keyspaceHits.Add(1)
 		}
 	}
 	return e

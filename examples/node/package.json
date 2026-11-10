@@ -1,0 +1,8 @@
+{
+  "name": "distcache-example-node",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "tsx main.ts" },
+  "dependencies": { "ioredis": "5.4.1" },
+  "devDependencies": { "tsx": "4.19.2", "typescript": "5.7.2" }
+}

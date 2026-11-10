@@ -1,3 +1,5 @@
+// Lua value representation: tables, Go functions and conversions.
+
 package lua
 
 import (

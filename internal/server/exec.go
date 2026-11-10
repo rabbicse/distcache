@@ -77,8 +77,8 @@ func (s *Server) NewSession() *Session {
 		created:   time.Now(),
 		unblockCh: make(chan int, 1),
 	}
-	c.w = resp.NewWriter(ss.buf, 2)
-	c.w.Mu = &c.wmu
+	c.writer = resp.NewWriter(ss.buf, 2)
+	c.writer.Mu = &c.writeMu
 	c.name.Store("")
 	c.libName.Store("")
 	c.libVer.Store("")
