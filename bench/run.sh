@@ -17,7 +17,12 @@ RD_PORT=6391
 TMP="$(mktemp -d)"
 PIDS=()
 cleanup() {
-  for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
+  for p in "${PIDS[@]:-}"; do
+    if [ -n "$p" ]; then
+      kill "$p" 2>/dev/null || true
+      wait "$p" 2>/dev/null || true # let the server exit before $TMP is removed
+    fi
+  done
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -29,27 +34,52 @@ if [ "${BENCH_PREBUILT:-0}" != 1 ]; then
 fi
 GOVER="$(go version 2>/dev/null || echo "${BENCH_GO_VERSION:-unknown} (prebuilt binaries)")"
 
-wait_port() { # port
+port_answers() { # port
+  bin/distcache-bench -p "$1" -c 1 -n 1 -t ping -q >/dev/null 2>&1
+}
+
+# require_free refuses to start when something already answers on the port,
+# otherwise the results would silently measure a foreign server.
+require_free() { # port
+  if port_answers "$1"; then
+    echo "port $1 is already in use by another server; stop it and retry" >&2
+    exit 1
+  fi
+}
+
+# wait_port waits for the server we launched (child pid $2) to answer.
+wait_port() { # port pid
   for _ in $(seq 1 100); do
-    if bin/distcache-bench -p "$1" -c 1 -n 1 -t ping -q >/dev/null 2>&1; then return 0; fi
+    if ! kill -0 "$2" 2>/dev/null; then
+      echo "server for port $1 exited during startup" >&2
+      return 1
+    fi
+    if port_answers "$1"; then return 0; fi
     sleep 0.1
   done
   echo "server on port $1 did not start" >&2
   return 1
 }
 
+# flush empties the server so every matrix cell starts from the same state.
+flush() { # port
+  bin/distcache-bench -p "$1" -c 1 -n 1 -t flushall -q >/dev/null
+}
+
 mkdir -p "$TMP/dc"
+require_free "$DC_PORT"
 bin/distcache-server --port "$DC_PORT" --save "" --appendonly no --dir "$TMP/dc" >"$TMP/dc.log" 2>&1 &
-PIDS+=($!)
-wait_port "$DC_PORT"
+PIDS+=("$!")
+wait_port "$DC_PORT" "$!"
 
 HAVE_REDIS=0
 if command -v redis-server >/dev/null 2>&1; then
   HAVE_REDIS=1
+  require_free "$RD_PORT"
   mkdir -p "$TMP/rd"
   redis-server --port "$RD_PORT" --save "" --appendonly no --dir "$TMP/rd" >"$TMP/rd.log" 2>&1 &
-  PIDS+=($!)
-  wait_port "$RD_PORT"
+  PIDS+=("$!")
+  wait_port "$RD_PORT" "$!"
 fi
 
 NCPU="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
@@ -87,8 +117,10 @@ run() { # port clients pipeline
 for P in 1 16; do
   for C in 50 500; do
     echo "== -P $P -c $C" >&2
+    flush "$DC_PORT"
     run "$DC_PORT" "$C" "$P" >"$TMP/dc.csv"
     if [ "$HAVE_REDIS" = 1 ]; then
+      flush "$RD_PORT"
       run "$RD_PORT" "$C" "$P" >"$TMP/rd.csv"
     else
       : >"$TMP/rd.csv"
@@ -102,7 +134,7 @@ for P in 1 16; do
       awk -F, '
         FILENAME == ARGV[1] { rd[$1]=$2; next }
         { r = ($1 in rd) ? sprintf("%.0f", rd[$1]) : "n/a"
-          ratio = ($1 in rd) ? sprintf("%.2f", $2/rd[$1]) : "n/a"
+          ratio = (($1 in rd) && rd[$1] > 0) ? sprintf("%.2f", $2/rd[$1]) : "n/a"
           printf "| %s | %.0f | %s | %s | %s | %s |\n", $1, $2, r, ratio, $3, $5 }
       ' "$TMP/rd.csv" "$TMP/dc.csv"
     } >>"$OUT"

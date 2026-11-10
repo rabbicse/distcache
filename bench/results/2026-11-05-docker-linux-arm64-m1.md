@@ -9,6 +9,8 @@ mem:  7.7 GiB
 note: Docker Desktop linuxkit VM (8 vCPU, 7.7 GiB) on an Apple M1 MacBook Pro (8 cores, 16 GiB); both servers and the load tool share the VM's 8 vCPUs
 ```
 
+Caveats: this is a single run per cell on a shared VM (load tool, DistCache and Redis share 8 vCPUs), so differences below roughly 10-15% are noise and the 500-client, pipeline-16 cells are saturated. It predates the per-cell FLUSHALL added to `bench/run.sh`, so later cells ran against structures grown by earlier ones (lpush, sadd, zadd). It will be re-run once Docker is available again.
+
 Requests per test: 1000000, tests: set,get,incr,lpush,sadd,hset,zadd, keyspace 100000, data size 3 bytes.
 Redis: Redis server v=8.4.8 sha=00000000:1 malloc=jemalloc-5.3.0 bits=64 build=741beb89eacc971b
 

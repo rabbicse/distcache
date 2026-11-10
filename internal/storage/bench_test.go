@@ -15,12 +15,15 @@ func benchKeys(n int) []string {
 	return keys
 }
 
+// shardSink keeps the ShardOf result live so the call cannot be optimised away.
+var shardSink int
+
 func BenchmarkShardOf(b *testing.B) {
 	ks := New(256, 1)
 	keys := benchKeys(1024)
 	b.ReportAllocs()
 	for i := 0; b.Loop(); i++ {
-		_ = ks.ShardOf(keys[i&1023])
+		shardSink = ks.ShardOf(keys[i&1023])
 	}
 }
 

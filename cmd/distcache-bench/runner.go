@@ -7,6 +7,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"net"
 	"slices"
@@ -29,7 +30,7 @@ var DefaultTests = []string{"set", "get", "incr", "lpush", "rpush", "lpop", "rpo
 type Config struct {
 	Addr     string        // host:port of the server under test
 	Clients  int           // parallel connections
-	Requests int           // total commands per test (ignored when Duration > 0)
+	Requests int           // total commands per test (unused when Duration > 0)
 	Pipeline int           // commands per write
 	DataSize int           // value size in bytes
 	Tests    []string      // test names, see DefaultTests
@@ -77,6 +78,9 @@ func (c Config) withDefaults() Config {
 type cmdGen func(dst []byte, key string, val string, rnd *rand.Rand) []byte
 
 var generators = map[string]cmdGen{
+	"flushall": func(dst []byte, _, _ string, _ *rand.Rand) []byte {
+		return resp.AppendCommandStrings(dst, "FLUSHALL")
+	},
 	"ping": func(dst []byte, _, _ string, _ *rand.Rand) []byte {
 		return resp.AppendCommandStrings(dst, "PING")
 	},
@@ -115,11 +119,19 @@ var generators = map[string]cmdGen{
 // shared holds state common to all clients of one test.
 type shared struct {
 	cfg       Config
+	name      string // test name, for error messages
 	gen       cmdGen
 	val       string
 	remaining atomic.Int64 // commands not yet claimed (count mode)
 	deadline  time.Time    // zero in count mode
 	done      atomic.Int64 // commands completed
+}
+
+// start arms the duration deadline; it runs after all clients have dialed.
+func (s *shared) start(cfg Config) {
+	if cfg.Duration > 0 {
+		s.deadline = time.Now().Add(cfg.Duration)
+	}
 }
 
 // claim reserves up to n commands and returns how many were granted.
@@ -140,21 +152,26 @@ func (s *shared) claim(n int) int {
 func runTest(cfg Config, name string, gen cmdGen) (Result, error) {
 	s := &shared{cfg: cfg, gen: gen, val: strings.Repeat("x", max(cfg.DataSize, 0))}
 	s.remaining.Store(int64(cfg.Requests))
-	if cfg.Duration > 0 {
-		s.deadline = time.Now().Add(cfg.Duration)
-	}
+	s.name = name
 
 	samples := make([][]time.Duration, cfg.Clients)
 	errs := make([]error, cfg.Clients)
-	var wg sync.WaitGroup
-	start := time.Now()
+	var wg, dialed sync.WaitGroup
+	// begin releases every client at once after all connections are open, so
+	// dial time is excluded from the measured interval.
+	begin := make(chan struct{})
 	for i := range cfg.Clients {
 		wg.Add(1)
+		dialed.Add(1)
 		go func() {
 			defer wg.Done()
-			samples[i], errs[i] = s.client(latencyReservoir/cfg.Clients + 1)
+			samples[i], errs[i] = s.client(latencyReservoir/cfg.Clients+1, &dialed, begin)
 		}()
 	}
+	dialed.Wait()
+	s.start(cfg)
+	start := time.Now()
+	close(begin)
 	wg.Wait()
 	secs := time.Since(start).Seconds()
 	if err := errors.Join(errs...); err != nil {
@@ -172,12 +189,14 @@ func runTest(cfg Config, name string, gen cmdGen) (Result, error) {
 
 // client drives one connection until the shared budget is exhausted. It keeps
 // at most capN latency samples by reservoir sampling.
-func (s *shared) client(capN int) ([]time.Duration, error) {
+func (s *shared) client(capN int, dialed *sync.WaitGroup, begin <-chan struct{}) ([]time.Duration, error) {
 	conn, err := net.DialTimeout("tcp", s.cfg.Addr, 5*time.Second)
+	dialed.Done()
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", s.cfg.Addr, err)
 	}
-	defer conn.Close() // read-only benchmark connection; close error is irrelevant
+	defer conn.Close() // benchmark connection; close error is irrelevant
+	<-begin
 
 	rd := resp.NewReader(conn, 64*1024)
 	rnd := rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64()))
@@ -205,7 +224,7 @@ func (s *shared) client(capN int) ([]time.Duration, error) {
 				return nil, fmt.Errorf("read: %w", err)
 			}
 			if v.Type == '-' {
-				return nil, fmt.Errorf("server error: %s", v.Str)
+				return nil, fmt.Errorf("server error reply to %s (pipeline of %d): %s", strings.ToUpper(s.name), n, v.Str)
 			}
 		}
 		d := time.Since(t0)
@@ -235,6 +254,6 @@ func percentile(sorted []time.Duration, q float64) time.Duration {
 	if len(sorted) == 0 {
 		return 0
 	}
-	i := min(int(q*float64(len(sorted))), len(sorted)-1)
+	i := min(max(int(math.Ceil(q*float64(len(sorted))))-1, 0), len(sorted)-1)
 	return sorted[i]
 }
