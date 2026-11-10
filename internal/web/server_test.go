@@ -16,7 +16,11 @@ const wantCSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-sr
 
 func newTestConsole(t *testing.T) *Console {
 	t.Helper()
-	c, err := New(Options{Config: config.Default(), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	cfg := config.Default()
+	if err := cfg.Set("requirepass", testPass, true); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Options{Config: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -78,9 +82,10 @@ func TestServer_StaticAssetsEmbedded(t *testing.T) {
 }
 
 func TestServer_PagesRenderNav(t *testing.T) {
-	h := newTestConsole(t).Handler()
-	for _, p := range []string{"/", "/keys", "/console", "/pubsub", "/login"} {
-		rec := get(t, h, p)
+	c := newTestConsole(t)
+	ck := loginCookieOK(t, c)
+	for _, p := range []string{"/", "/keys", "/console", "/pubsub"} {
+		rec := authedGet(c, p, ck, nil)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: got status %d, want 200", p, rec.Code)
 		}
@@ -97,10 +102,11 @@ func TestServer_PanicRecovered(t *testing.T) {
 	c := newTestConsole(t)
 	c.mux.HandleFunc("GET /boom", func(http.ResponseWriter, *http.Request) { panic("boom") })
 	h := c.Handler()
-	if rec := get(t, h, "/boom"); rec.Code != http.StatusInternalServerError {
+	ck := loginCookieOK(t, c)
+	if rec := authedGet(c, "/boom", ck, nil); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("panic route: got status %d, want 500", rec.Code)
 	}
-	rec := get(t, h, "/boom")
+	rec := authedGet(c, "/boom", ck, nil)
 	body := strings.ToLower(rec.Body.String())
 	if strings.Contains(body, "goroutine") || strings.Contains(body, "panic") || strings.Contains(body, ".go:") {
 		t.Errorf("panic response leaks stack text: %q", body)
@@ -114,7 +120,8 @@ func TestServer_PanicRecovered(t *testing.T) {
 }
 
 func TestServer_UnknownRoute404(t *testing.T) {
-	rec := get(t, newTestConsole(t).Handler(), "/does/not/exist")
+	c := newTestConsole(t)
+	rec := authedGet(c, "/does/not/exist", loginCookieOK(t, c), nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("got status %d, want 404", rec.Code)
 	}
@@ -122,7 +129,7 @@ func TestServer_UnknownRoute404(t *testing.T) {
 
 func TestServer_StartCloseAddr(t *testing.T) {
 	cfg := config.Default()
-	cfg.WebBind, cfg.WebPort, cfg.WebTLS = "127.0.0.1", 0, "off"
+	cfg.WebBind, cfg.WebPort, cfg.WebTLS, cfg.WebInsecure = "127.0.0.1", 0, "off", true
 	c, err := New(Options{Config: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +159,7 @@ func TestServer_StaticDirectoryListing404(t *testing.T) {
 
 func TestServer_CloseFreesPort(t *testing.T) {
 	cfg := config.Default()
-	cfg.WebBind, cfg.WebPort, cfg.WebTLS = "127.0.0.1", 0, "off"
+	cfg.WebBind, cfg.WebPort, cfg.WebTLS, cfg.WebInsecure = "127.0.0.1", 0, "off", true
 	c, err := New(Options{Config: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)

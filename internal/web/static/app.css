@@ -47,3 +47,7 @@ button { padding: 9px 14px; border: 0; border-radius: 6px; background: var(--acc
   main { padding: 16px 12px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+.nav-form { margin: 0; display: inline; }
+.nav-form button { padding: 6px 12px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: inherit; cursor: pointer; }
+.nav-form button:hover { color: var(--text); }
+.form-error { color: var(--danger, #c0392b); }

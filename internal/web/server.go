@@ -3,8 +3,8 @@
 //
 // This file holds the Console lifecycle (construction, listening, shutdown),
 // routing and page rendering. Security headers and panic recovery live in
-// middleware.go. Authentication (Task 5) and TLS material (Task 4) plug into
-// the hook points marked below.
+// middleware.go. Authentication lives in auth.go and TLS
+// material in tls.go.
 package web
 
 import (
@@ -20,6 +20,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"path"
 	"strconv"
 	"strings"
@@ -56,6 +57,16 @@ type Console struct {
 	mux  *http.ServeMux // routes; handler wraps it with the middleware chain
 	h    http.Handler
 
+	// now is the clock for session expiry and lockout; tests inject one.
+	now func() time.Time
+	// trusted holds the parsed web-trusted-proxy prefixes.
+	trusted []netip.Prefix
+
+	// authMu guards sessions, lockouts and every session's lastSeen.
+	authMu   sync.Mutex
+	sessions map[string]*session
+	lockouts map[netip.Addr]*lockout
+
 	// newTicker creates the insecure-warning ticker; tests inject their own.
 	newTicker func(time.Duration) (<-chan time.Time, func())
 
@@ -64,21 +75,32 @@ type Console struct {
 	ln       net.Listener
 	hs       *http.Server
 	stopWarn chan struct{} // closed by Close to end the warning goroutine
+	stopJan  chan struct{} // closed by Close to end the janitor
 }
 
 // page is the data passed to layout.html for every page.
 type page struct {
-	Title    string
-	Active   string // nav entry to highlight
-	Insecure bool   // show the insecure-banner slot
-	Status   int
-	Message  string
+	Title     string
+	Active    string // nav entry to highlight
+	Insecure  bool   // show the insecure-banner slot
+	Status    int
+	Message   string
+	CSRF      string // session CSRF token (login form token on the login page)
+	HXHeaders string // hx-headers JSON carrying CSRF
 }
 
 // New builds the console handler and parses templates. It does not listen.
+// It returns ErrNoPassword when requirepass is empty and web-insecure is off.
 func New(o Options) (*Console, error) {
 	if o.Config == nil {
 		return nil, errors.New("web: nil config")
+	}
+	if o.Config.RequirePass() == "" && !o.Config.WebInsecure {
+		return nil, ErrNoPassword
+	}
+	trusted, err := parsePrefixes(o.Config.WebTrustedProxy)
+	if err != nil {
+		return nil, fmt.Errorf("web-trusted-proxy: %w", err)
 	}
 	log := o.Log
 	if log == nil {
@@ -92,20 +114,26 @@ func New(o Options) (*Console, error) {
 	if err != nil {
 		return nil, fmt.Errorf("embed static: %w", err)
 	}
-	c := &Console{srv: o.Server, cfg: o.Config, log: log, tmpl: tmpl, mux: http.NewServeMux(), newTicker: defaultTicker}
+	c := &Console{
+		srv: o.Server, cfg: o.Config, log: log, tmpl: tmpl, mux: http.NewServeMux(),
+		now: time.Now, trusted: trusted,
+		sessions: make(map[string]*session), lockouts: make(map[netip.Addr]*lockout),
+		newTicker: defaultTicker,
+	}
 
 	c.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(static)))
 	c.mux.HandleFunc("GET /{$}", c.pageHandler("Dashboard", "dashboard"))
 	c.mux.HandleFunc("GET /keys", c.pageHandler("Keys", "keys"))
 	c.mux.HandleFunc("GET /console", c.pageHandler("Console", "console"))
 	c.mux.HandleFunc("GET /pubsub", c.pageHandler("Pub/Sub", "pubsub"))
-	c.mux.HandleFunc("GET /login", c.pageHandler("Login", "login"))
-	c.mux.HandleFunc("GET /logout", c.pageHandler("Logout", "logout"))
+	c.mux.HandleFunc("GET /login", c.handleLoginGet)
+	c.mux.HandleFunc("POST /login", c.handleLoginPost)
+	c.mux.HandleFunc("POST /logout", c.handleLogout)
 	c.mux.HandleFunc("/", c.notFound)
 
-	// Chain order: recover -> headers -> (session/CSRF, Task 5) -> mux.
+	// Chain order: recover -> headers -> session/CSRF -> mux.
 	var h http.Handler = c.mux
-	// Task 5 wraps h with the session and CSRF middleware here.
+	h = c.requireAuth(h)
 	h = securityHeaders(h)
 	h = recoverer(log, c.renderError, h)
 	c.h = h
@@ -151,6 +179,8 @@ func (c *Console) Start() error {
 	}
 	c.mu.Lock()
 	c.ln, c.hs = ln, hs
+	c.stopJan = make(chan struct{})
+	go c.janitor(c.stopJan) // owned by Close, which closes stopJan
 	if insecureEffective(c.cfg) {
 		c.stopWarn = make(chan struct{})
 		ticks, stop := c.newTicker(insecureWarnEvery)
@@ -195,7 +225,12 @@ func (c *Console) Close() error {
 		close(c.stopWarn)
 		c.stopWarn = nil
 	}
+	if c.stopJan != nil {
+		close(c.stopJan)
+		c.stopJan = nil
+	}
 	c.mu.Unlock()
+	defer c.closeAllSessions()
 	if hs == nil {
 		return nil
 	}
@@ -213,7 +248,11 @@ func (c *Console) Close() error {
 // pageHandler returns a handler that renders a placeholder page in the layout.
 func (c *Console) pageHandler(title, active string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c.render(w, http.StatusOK, "layout.html", page{Title: title, Active: active, Insecure: c.insecure()})
+		p := page{Title: title, Active: active, Insecure: c.insecure()}
+		if s := sessionOf(r); s != nil {
+			p.CSRF, p.HXHeaders = s.csrf, hxHeaders(s.csrf)
+		}
+		c.render(w, http.StatusOK, "layout.html", p)
 	}
 }
 
