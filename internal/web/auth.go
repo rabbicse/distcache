@@ -9,6 +9,18 @@
 // Origin check that rejects any POST whose Origin header names another host.
 // Origin alone is not enough because the console's Referrer-Policy
 // no-referrer makes browsers send "Origin: null" on same-origin form posts.
+// A real Origin must match the expected scheme and host, taken from
+// X-Forwarded-Proto / X-Forwarded-Host when the peer is a trusted proxy.
+//
+// Cookies: over HTTPS they carry the __Host- prefix (__Host-dc_session,
+// __Host-dc_login), which forces Secure, Path=/ and no Domain so a sibling
+// service on the same host cannot plant them; over HTTP plain names are used.
+//
+// Lockout: failures are keyed per IPv4 address or per IPv6 /64. The lock check
+// and an in-flight attempt reservation happen in one critical section, so
+// concurrent requests cannot exceed 5 password checks per window. In addition,
+// more than 100 failures across all clients within 1 minute rejects every
+// login attempt for 1 minute (logged once at warn).
 package web
 
 import (
@@ -19,6 +31,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -51,6 +64,10 @@ const (
 	// mode, where any request creates one); the least recently seen goes.
 	maxSessions = 1024
 
+	globalFailLimit  = 100
+	globalFailWindow = time.Minute
+	globalLockout    = time.Minute
+
 	janitorEvery   = time.Minute
 	maxLoginBody   = 4 << 10
 	maxAuditString = 64
@@ -72,6 +89,7 @@ type session struct {
 // lockout tracks login failures from one client IP.
 type lockout struct {
 	failures    int
+	inflight    int // attempts reserved but not yet resolved
 	windowStart time.Time
 	lockedUntil time.Time
 	touched     time.Time // last update, for eviction and sweeping
@@ -147,6 +165,11 @@ func peerAddr(r *http.Request) netip.Addr {
 // right, skipping further trusted hops, so a client cannot choose its own
 // address by prepending entries.
 func clientIP(r *http.Request, trusted []netip.Prefix) netip.Addr {
+	return clientIPLog(r, trusted, nil)
+}
+
+// clientIPLog is clientIP with a logger for unparsable hops (nil: silent).
+func clientIPLog(r *http.Request, trusted []netip.Prefix, log *slog.Logger) netip.Addr {
 	peer := peerAddr(r)
 	if !inPrefixes(peer, trusted) {
 		return peer
@@ -156,16 +179,43 @@ func clientIP(r *http.Request, trusted []netip.Prefix) netip.Addr {
 		hops = append(hops, strings.Split(v, ",")...)
 	}
 	for i := len(hops) - 1; i >= 0; i-- {
-		a, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
-		if err != nil {
+		a, ok := parseHop(hops[i])
+		if !ok {
+			if log != nil {
+				log.Debug("web unparsable X-Forwarded-For hop", "hop", hops[i])
+			}
 			return peer // malformed chain: fall back to the proxy itself
 		}
-		a = a.Unmap()
 		if !inPrefixes(a, trusted) {
 			return a
 		}
 	}
 	return peer
+}
+
+// parseHop parses one X-Forwarded-For entry: ip, ip:port or [v6]:port.
+func parseHop(h string) (netip.Addr, bool) {
+	h = strings.TrimSpace(h)
+	if a, err := netip.ParseAddr(h); err == nil {
+		return a.Unmap(), true
+	}
+	if ap, err := netip.ParseAddrPort(h); err == nil {
+		return ap.Addr().Unmap(), true
+	}
+	return netip.Addr{}, false
+}
+
+// lockoutKey is the lockout bucket for a: the address itself for IPv4, its
+// /64 for IPv6 (a single host typically controls a whole /64).
+func lockoutKey(a netip.Addr) netip.Prefix {
+	if a.Is6() {
+		p, _ := a.WithZone("").Prefix(64) // cannot fail for 64 <= 128
+		return p
+	}
+	if !a.IsValid() {
+		return netip.Prefix{}
+	}
+	return netip.PrefixFrom(a, a.BitLen())
 }
 
 // isHTTPS reports whether the browser's connection is HTTPS, directly or
@@ -187,9 +237,21 @@ func (c *Console) loginRequired() bool {
 	return c.cfg.RequirePass() != "" || !c.cfg.WebInsecure
 }
 
-func (c *Console) setCookie(w http.ResponseWriter, r *http.Request, name, value string, maxAge int) {
+// cookieName returns base with the __Host- prefix when the request is HTTPS.
+func (c *Console) cookieName(r *http.Request, base string) string {
+	if c.isHTTPS(r) {
+		return "__Host-" + base
+	}
+	return base
+}
+
+func (c *Console) cookie(r *http.Request, base string) (*http.Cookie, error) {
+	return r.Cookie(c.cookieName(r, base))
+}
+
+func (c *Console) setCookie(w http.ResponseWriter, r *http.Request, base, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{
-		Name: name, Value: value, Path: "/", MaxAge: maxAge,
+		Name: c.cookieName(r, base), Value: value, Path: "/", MaxAge: maxAge,
 		HttpOnly: true, Secure: c.isHTTPS(r), SameSite: http.SameSiteStrictMode,
 	})
 }
@@ -251,7 +313,7 @@ func (c *Console) sessionByID(id string) *session {
 
 // sessionFrom returns the request's session, or nil when absent or expired.
 func (c *Console) sessionFrom(r *http.Request) *session {
-	ck, err := r.Cookie(sessionCookie)
+	ck, err := c.cookie(r, sessionCookie)
 	if err != nil || ck.Value == "" {
 		return nil
 	}
@@ -309,14 +371,27 @@ func safeMethod(m string) bool {
 }
 
 // sameOrigin reports whether an Origin header, if present and not "null",
-// names the host the request was sent to.
-func sameOrigin(r *http.Request) bool {
+// matches the scheme and host the browser addressed. Behind a trusted proxy
+// those come from X-Forwarded-Proto and X-Forwarded-Host.
+func (c *Console) sameOrigin(r *http.Request) bool {
 	o := r.Header.Get("Origin")
 	if o == "" || o == "null" {
 		return true
 	}
 	u, err := url.Parse(o)
-	return err == nil && strings.EqualFold(u.Host, r.Host)
+	if err != nil {
+		return false
+	}
+	scheme, host := "http", r.Host
+	if c.isHTTPS(r) {
+		scheme = "https"
+	}
+	if inPrefixes(peerAddr(r), c.trusted) {
+		if fh, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Host"), ","); strings.TrimSpace(fh) != "" {
+			host = strings.TrimSpace(fh)
+		}
+	}
+	return strings.EqualFold(u.Scheme, scheme) && strings.EqualFold(u.Host, host)
 }
 
 // loginPage renders the login form, issuing a fresh pre-session token.
@@ -336,12 +411,12 @@ func (c *Console) handleLoginGet(w http.ResponseWriter, r *http.Request) {
 
 func (c *Console) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBody)
-	lc, err := r.Cookie(loginCookie)
-	if !sameOrigin(r) || err != nil || lc.Value == "" || !tokenEqual(lc.Value, r.PostFormValue("csrf")) {
+	lc, err := c.cookie(r, loginCookie)
+	if !c.sameOrigin(r) || err != nil || lc.Value == "" || !tokenEqual(lc.Value, r.PostFormValue("csrf")) {
 		c.renderError(w, http.StatusForbidden, "Login form expired or cross-site request; reload and try again")
 		return
 	}
-	ip := clientIP(r, c.trusted)
+	ip := clientIPLog(r, c.trusted, c.log)
 	user := r.PostFormValue("username")
 	if user == "" {
 		user = defaultUser
@@ -350,24 +425,20 @@ func (c *Console) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	if len(auditUser) > maxAuditString {
 		auditUser = auditUser[:maxAuditString]
 	}
-	if c.lockedOut(ip) {
+	if !c.reserveAttempt(ip) {
 		c.log.Info("web login fail", "user", auditUser, "ip", ip.String(), "reason", "locked out")
 		c.loginPage(w, r, http.StatusTooManyRequests, "Too many failed attempts; try again later")
 		return
 	}
-	if !c.checkPassword(user, r.PostFormValue("password")) {
-		c.authMu.Lock()
-		c.recordFailureLocked(ip)
-		c.authMu.Unlock()
+	ok := c.checkPass(user, r.PostFormValue("password"))
+	c.finishAttempt(ip, ok)
+	if !ok {
 		c.log.Info("web login fail", "user", auditUser, "ip", ip.String())
 		c.loginPage(w, r, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
-	c.authMu.Lock()
-	delete(c.lockouts, ip)
-	c.authMu.Unlock()
 	// Never reuse a pre-existing session ID (fixation).
-	if ck, err := r.Cookie(sessionCookie); err == nil {
+	if ck, err := c.cookie(r, sessionCookie); err == nil {
 		c.deleteSession(ck.Value)
 	}
 	s := c.newSession(defaultUser)
@@ -394,32 +465,78 @@ func (c *Console) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-func (c *Console) lockedOut(ip netip.Addr) bool {
+// reserveAttempt checks the global and per-client locks and, if neither
+// applies, reserves an in-flight attempt that counts toward the per-client
+// limit until finishAttempt resolves it. Check and reservation share one
+// critical section so concurrent requests cannot exceed the limit.
+func (c *Console) reserveAttempt(ip netip.Addr) bool {
+	now := c.now()
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
-	l := c.lockouts[ip]
-	return l != nil && c.now().Before(l.lockedUntil)
+	if now.Before(c.globalLockedUntil) {
+		return false
+	}
+	l := c.lockoutLocked(lockoutKey(ip), now)
+	if now.Before(l.lockedUntil) || l.failures+l.inflight >= maxLoginFailures {
+		return false
+	}
+	l.inflight++
+	l.touched = now
+	return true
 }
 
-// recordFailureLocked counts a failed login from ip. Caller holds authMu.
-func (c *Console) recordFailureLocked(ip netip.Addr) {
-	now := c.now()
-	l := c.lockouts[ip]
+// finishAttempt resolves a reserved attempt: success clears the client's
+// entry, failure records it.
+func (c *Console) finishAttempt(ip netip.Addr, ok bool) {
+	key := lockoutKey(ip)
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	if ok {
+		delete(c.lockouts, key)
+		return
+	}
+	if l := c.lockouts[key]; l != nil && l.inflight > 0 {
+		l.inflight--
+	}
+	c.recordFailureLocked(ip)
+}
+
+// lockoutLocked returns the entry for key, creating it (and evicting when
+// full) as needed and resetting an expired failure window. Caller holds authMu.
+func (c *Console) lockoutLocked(key netip.Prefix, now time.Time) *lockout {
+	l := c.lockouts[key]
 	if l == nil {
 		if len(c.lockouts) >= maxLockoutEntries {
 			c.evictOldestLockoutLocked()
 		}
-		l = &lockout{windowStart: now}
-		c.lockouts[ip] = l
+		l = &lockout{windowStart: now, touched: now}
+		c.lockouts[key] = l
 	}
 	if now.Sub(l.windowStart) > lockoutWindow {
 		l.failures, l.windowStart = 0, now
 	}
+	return l
+}
+
+// recordFailureLocked counts a failed login from ip, per client and
+// globally. Caller holds authMu.
+func (c *Console) recordFailureLocked(ip netip.Addr) {
+	now := c.now()
+	l := c.lockoutLocked(lockoutKey(ip), now)
 	l.failures++
 	l.touched = now
 	if l.failures >= maxLoginFailures {
 		l.lockedUntil = now.Add(lockoutDuration)
 		l.failures, l.windowStart = 0, now
+	}
+	if now.Sub(c.globalWindowStart) > globalFailWindow {
+		c.globalFailures, c.globalWindowStart = 0, now
+	}
+	c.globalFailures++
+	if c.globalFailures > globalFailLimit && !now.Before(c.globalLockedUntil) {
+		c.globalLockedUntil = now.Add(globalLockout)
+		c.globalFailures, c.globalWindowStart = 0, now
+		c.log.Warn("web login globally locked: too many failed logins", "failures", globalFailLimit+1, "window", globalFailWindow.String(), "duration", globalLockout.String())
 	}
 }
 
@@ -427,7 +544,7 @@ func (c *Console) recordFailureLocked(ip netip.Addr) {
 // entries that are not currently locked. Caller holds authMu.
 func (c *Console) evictOldestLockoutLocked() {
 	now := c.now()
-	var victim netip.Addr
+	var victim netip.Prefix
 	var vl *lockout
 	for ip, l := range c.lockouts {
 		locked := now.Before(l.lockedUntil)
@@ -455,7 +572,7 @@ func (c *Console) sweep() {
 		}
 	}
 	for ip, l := range c.lockouts {
-		if !now.Before(l.lockedUntil) && now.Sub(l.windowStart) > lockoutWindow {
+		if l.inflight == 0 && !now.Before(l.lockedUntil) && now.Sub(l.windowStart) > lockoutWindow {
 			delete(c.lockouts, ip)
 		}
 	}

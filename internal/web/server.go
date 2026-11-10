@@ -65,7 +65,14 @@ type Console struct {
 	// authMu guards sessions, lockouts and every session's lastSeen.
 	authMu   sync.Mutex
 	sessions map[string]*session
-	lockouts map[netip.Addr]*lockout
+	lockouts map[netip.Prefix]*lockout
+	// Global failure limiter, also guarded by authMu.
+	globalFailures    int
+	globalWindowStart time.Time
+	globalLockedUntil time.Time
+
+	// checkPass validates credentials; tests inject a counting hook.
+	checkPass func(user, pass string) bool
 
 	// newTicker creates the insecure-warning ticker; tests inject their own.
 	newTicker func(time.Duration) (<-chan time.Time, func())
@@ -117,10 +124,11 @@ func New(o Options) (*Console, error) {
 	c := &Console{
 		srv: o.Server, cfg: o.Config, log: log, tmpl: tmpl, mux: http.NewServeMux(),
 		now: time.Now, trusted: trusted,
-		sessions: make(map[string]*session), lockouts: make(map[netip.Addr]*lockout),
+		sessions: make(map[string]*session), lockouts: make(map[netip.Prefix]*lockout),
 		newTicker: defaultTicker,
 	}
 
+	c.checkPass = c.checkPassword
 	c.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(static)))
 	c.mux.HandleFunc("GET /{$}", c.pageHandler("Dashboard", "dashboard"))
 	c.mux.HandleFunc("GET /keys", c.pageHandler("Keys", "keys"))

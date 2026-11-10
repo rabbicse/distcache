@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,7 +55,11 @@ func newAuthConsole(t *testing.T, mutate func(*config.Config)) (*Console, *fakeC
 func postLogin(t *testing.T, c *Console, pass string, mod func(*http.Request)) *httptest.ResponseRecorder {
 	t.Helper()
 	g := httptest.NewRecorder()
-	c.Handler().ServeHTTP(g, httptest.NewRequest(http.MethodGet, "/login", nil))
+	gr := httptest.NewRequest(http.MethodGet, "/login", nil)
+	if mod != nil {
+		mod(gr)
+	}
+	c.Handler().ServeHTTP(g, gr)
 	lc := findCookie(g.Result().Cookies(), loginCookie)
 	if lc == nil {
 		t.Fatal("GET /login set no login cookie")
@@ -71,7 +78,7 @@ func postLogin(t *testing.T, c *Console, pass string, mod func(*http.Request)) *
 
 func findCookie(cs []*http.Cookie, name string) *http.Cookie {
 	for _, ck := range cs {
-		if ck.Name == name {
+		if ck.Name == name || ck.Name == "__Host-"+name {
 			return ck
 		}
 	}
@@ -136,6 +143,24 @@ func TestAuth_LoginSuccessSetsCookie(t *testing.T) {
 			}
 			if ck.Secure != tc.wantSecure {
 				t.Errorf("Secure: got %v, want %v", ck.Secure, tc.wantSecure)
+			}
+			wantName := sessionCookie
+			if tc.wantSecure {
+				wantName = "__Host-" + sessionCookie
+			}
+			if ck.Name != wantName || ck.Domain != "" {
+				t.Errorf("cookie name/domain: got %q/%q, want %q/\"\"", ck.Name, ck.Domain, wantName)
+			}
+			if mod := tc.mod; mod != nil {
+				// The session cookie works on a follow-up request over the same scheme.
+				r := httptest.NewRequest(http.MethodGet, "/", nil)
+				mod(r)
+				r.AddCookie(ck)
+				rec := httptest.NewRecorder()
+				c.Handler().ServeHTTP(rec, r)
+				if rec.Code != http.StatusOK {
+					t.Errorf("follow-up: got %d, want 200", rec.Code)
+				}
 			}
 		})
 	}
@@ -244,6 +269,9 @@ func TestAuth_ClientIP(t *testing.T) {
 		{"trusted uses xff", "10.0.0.5:1", "1.2.3.4", "1.2.3.4"},
 		{"trusted skips trusted hops", "10.0.0.5:1", "1.2.3.4, 5.6.7.8, 10.9.9.9", "5.6.7.8"},
 		{"trusted bad xff", "10.0.0.5:1", "garbage", "10.0.0.5"},
+		{"xff v4 with port", "10.0.0.5:1", "1.2.3.4:5678", "1.2.3.4"},
+		{"xff v6 with port", "10.0.0.5:1", "[2001:db8::1]:443", "2001:db8::1"},
+		{"xff bare v6", "10.0.0.5:1", "2001:db8::2", "2001:db8::2"},
 		{"mapped v4", "[::ffff:192.0.2.1]:1", "", "192.0.2.1"},
 	}
 	for _, tc := range tests {
@@ -490,4 +518,131 @@ func mustPrefixes(t *testing.T, list []string) []netip.Prefix {
 // netipFromInt returns a distinct IPv4 address for i.
 func netipFromInt(i int) netip.Addr {
 	return netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+}
+
+func TestAuth_ConcurrentAttemptsBounded(t *testing.T) {
+	c, _, _ := newAuthConsole(t, nil)
+	var checks atomic.Int32
+	release := make(chan struct{})
+	c.checkPass = func(user, pass string) bool {
+		checks.Add(1)
+		<-release
+		return false
+	}
+	const n = 20
+	codes := make(chan int, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes <- postLogin(t, c, "bad", nil).Code
+		}()
+	}
+	// Let blocked checkers go once every request has either reserved or been refused.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(codes)+int(checks.Load()) < n && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+	close(codes)
+	if got := checks.Load(); got > maxLoginFailures {
+		t.Fatalf("got %d password checks, want <= %d", got, maxLoginFailures)
+	}
+	var unauthorized, limited int
+	for code := range codes {
+		switch code {
+		case http.StatusUnauthorized:
+			unauthorized++
+		case http.StatusTooManyRequests:
+			limited++
+		default:
+			t.Errorf("unexpected status %d", code)
+		}
+	}
+	if unauthorized != int(checks.Load()) || unauthorized+limited != n {
+		t.Errorf("got %d 401 and %d 429, want %d checks and %d total", unauthorized, limited, checks.Load(), n)
+	}
+}
+
+func TestAuth_LockoutIPv6Slash64(t *testing.T) {
+	c, _, _ := newAuthConsole(t, nil)
+	for i := range 5 {
+		addr := fmt.Sprintf("[2001:db8:1:2::%x]:4000", i+1)
+		postLogin(t, c, "bad", func(r *http.Request) { r.RemoteAddr = addr })
+	}
+	same := postLogin(t, c, testPass, func(r *http.Request) { r.RemoteAddr = "[2001:db8:1:2:ffff::9]:4000" })
+	if same.Code != http.StatusTooManyRequests {
+		t.Errorf("same /64: got %d, want 429", same.Code)
+	}
+	other := postLogin(t, c, testPass, func(r *http.Request) { r.RemoteAddr = "[2001:db8:1:3::1]:4000" })
+	if other.Code != http.StatusSeeOther {
+		t.Errorf("other /64: got %d, want 303", other.Code)
+	}
+}
+
+func TestAuth_GlobalFailureLimit(t *testing.T) {
+	c, clk, lb := newAuthConsole(t, nil)
+	from := func(i int) func(*http.Request) {
+		return func(r *http.Request) { r.RemoteAddr = fmt.Sprintf("198.18.%d.%d:1", i/250, i%250+1) }
+	}
+	for i := range globalFailLimit {
+		if rec := postLogin(t, c, "bad", from(i)); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: got %d, want 401", i, rec.Code)
+		}
+	}
+	if rec := postLogin(t, c, testPass, from(500)); rec.Code != http.StatusSeeOther {
+		t.Fatalf("at limit: got %d, want 303", rec.Code)
+	}
+	postLogin(t, c, "bad", from(501)) // the 101st failure trips the global lock
+	for i := range 3 {
+		if rec := postLogin(t, c, testPass, from(600+i)); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("global lock: got %d, want 429", rec.Code)
+		}
+	}
+	if n := strings.Count(lb.String(), "globally locked"); n != 1 {
+		t.Errorf("got %d global warn lines, want 1", n)
+	}
+	clk.advance(globalLockout + time.Second)
+	if rec := postLogin(t, c, testPass, from(700)); rec.Code != http.StatusSeeOther {
+		t.Fatalf("after global lock: got %d, want 303", rec.Code)
+	}
+}
+
+func TestAuth_LoginOriginScheme(t *testing.T) {
+	tests := []struct {
+		name   string
+		mod    func(*http.Request)
+		wantOK bool
+	}{
+		{"same http", func(r *http.Request) { r.Header.Set("Origin", "http://example.com") }, true},
+		{"scheme mismatch", func(r *http.Request) { r.Header.Set("Origin", "https://example.com") }, false},
+		{"null", func(r *http.Request) { r.Header.Set("Origin", "null") }, true},
+		{"proxy forwarded host", func(r *http.Request) {
+			r.RemoteAddr = "10.0.0.1:1"
+			r.Header.Set("X-Forwarded-Proto", "https")
+			r.Header.Set("X-Forwarded-Host", "console.example.org")
+			r.Header.Set("Origin", "https://console.example.org")
+		}, true},
+		{"proxy wrong host", func(r *http.Request) {
+			r.RemoteAddr = "10.0.0.1:1"
+			r.Header.Set("X-Forwarded-Proto", "https")
+			r.Header.Set("X-Forwarded-Host", "console.example.org")
+			r.Header.Set("Origin", "https://example.com")
+		}, false},
+		{"untrusted forwarded host ignored", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Host", "evil.example")
+			r.Header.Set("Origin", "http://evil.example")
+		}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, _ := newAuthConsole(t, func(cfg *config.Config) { cfg.WebTrustedProxy = []string{"10.0.0.1"} })
+			rec := postLogin(t, c, testPass, tc.mod)
+			if got := rec.Code == http.StatusSeeOther; got != tc.wantOK {
+				t.Errorf("got %d, want ok=%v", rec.Code, tc.wantOK)
+			}
+		})
+	}
 }
