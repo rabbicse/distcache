@@ -145,10 +145,11 @@ func ttlGeneric(c *Ctx, ms, absolute bool) {
 		return
 	}
 	if absolute {
+		// Like ttlGenericCommand, seconds are rounded, not truncated.
 		if ms {
 			c.W.WriteInt(e.ExpireAt)
 		} else {
-			c.W.WriteInt(e.ExpireAt / 1000)
+			c.W.WriteInt((e.ExpireAt + 500) / 1000)
 		}
 		return
 	}
@@ -767,7 +768,7 @@ func (c *Ctx) parseDBIndexMsg(i int, msg string) (int, bool) {
 func cmdSelect(c *Ctx) {
 	n, ok := parseInt(c.Args[1])
 	if !ok {
-		c.Err("ERR invalid DB index")
+		c.Err(errNotInt)
 		return
 	}
 	if n < 0 || n >= int64(c.server.keyspace.NumDB) {

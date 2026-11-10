@@ -536,7 +536,6 @@ func cmdRPopLPush(c *Ctx) {
 }
 
 func nullArrayReply(w *resp.Writer) { w.WriteNullArray() }
-func nullReply(w *resp.Writer)      { w.WriteNull() }
 
 func cmdBLMove(c *Ctx) {
 	fromLeft, ok := parseWhere(c, 3)
@@ -573,7 +572,8 @@ func blmoveCore(c *Ctx, fromLeft, toLeft bool, deadline int64) {
 			c.W.WriteNull()
 			return
 		}
-		c.Block([]string{src}, deadline, nullReply)
+		// Redis times out every list block with a null array, BLMOVE included.
+		c.Block([]string{src}, deadline, nullArrayReply)
 		return
 	}
 	c.Rewrite([]byte("LMOVE"), c.Args[1], c.Args[2], []byte(sideName(fromLeft)), []byte(sideName(toLeft)))
