@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,8 +132,11 @@ func (c *Console) Start() error {
 		Handler:           c.h,
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		ErrorLog:          slog.NewLogLogger(c.log.Handler(), slog.LevelWarn),
+		ReadTimeout:       30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+		// WriteTimeout is deliberately unset: it would kill long-lived SSE streams.
+		IdleTimeout: 2 * time.Minute,
+		ErrorLog:    slog.NewLogLogger(c.log.Handler(), slog.LevelWarn),
 	}
 	c.mu.Lock()
 	c.ln, c.hs = ln, hs
@@ -166,11 +170,14 @@ func (c *Console) Addr() string {
 // Close gracefully stops the listener; it is a no-op before Start.
 func (c *Console) Close() error {
 	c.mu.Lock()
-	hs := c.hs
+	hs, ln := c.hs, c.ln
 	c.mu.Unlock()
 	if hs == nil {
 		return nil
 	}
+	// Serve may not have registered the listener yet, in which case Shutdown
+	// would leave the port bound; close it explicitly (double close is harmless).
+	defer func() { _ = ln.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := hs.Shutdown(ctx); err != nil {
@@ -218,6 +225,11 @@ func (c *Console) render(w http.ResponseWriter, status int, name string, p page)
 func staticHandler(fsys fs.FS) http.Handler {
 	fileServer := http.FileServerFS(fsys)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No directory listings: FileServer would index the embedded tree.
+		if r.URL.Path == "" || strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
 		if ct := staticType(path.Ext(r.URL.Path)); ct != "" {
 			w.Header().Set("Content-Type", ct)
 		}

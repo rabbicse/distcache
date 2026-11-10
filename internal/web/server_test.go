@@ -3,6 +3,7 @@ package web
 import (
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,6 +100,14 @@ func TestServer_PanicRecovered(t *testing.T) {
 	if rec := get(t, h, "/boom"); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("panic route: got status %d, want 500", rec.Code)
 	}
+	rec := get(t, h, "/boom")
+	body := strings.ToLower(rec.Body.String())
+	if strings.Contains(body, "goroutine") || strings.Contains(body, "panic") || strings.Contains(body, ".go:") {
+		t.Errorf("panic response leaks stack text: %q", body)
+	}
+	if got := rec.Header().Get("Content-Security-Policy"); got != wantCSP {
+		t.Errorf("CSP on 500: got %q, want %q", got, wantCSP)
+	}
 	if rec := get(t, h, "/login"); rec.Code != http.StatusOK {
 		t.Fatalf("after panic: got status %d, want 200", rec.Code)
 	}
@@ -130,4 +139,34 @@ func TestServer_StartCloseAddr(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("got status %d, want 200", resp.StatusCode)
 	}
+}
+
+func TestServer_StaticDirectoryListing404(t *testing.T) {
+	h := newTestConsole(t).Handler()
+	for _, p := range []string{"/static/", "/static/sub/"} {
+		if rec := get(t, h, p); rec.Code != http.StatusNotFound {
+			t.Errorf("%s: got status %d, want 404", p, rec.Code)
+		}
+	}
+}
+
+func TestServer_CloseFreesPort(t *testing.T) {
+	cfg := config.Default()
+	cfg.WebBind, cfg.WebPort, cfg.WebTLS = "127.0.0.1", 0, "off"
+	c, err := New(Options{Config: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	addr := c.Addr()
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("re-listen %s: %v", addr, err)
+	}
+	_ = ln.Close()
 }
