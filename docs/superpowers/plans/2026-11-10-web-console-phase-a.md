@@ -245,7 +245,9 @@
   - Sparklines are inline SVG `<polyline>` elements over the last 300 samples.
   - The heatmap is an SVG grid with one cell per shard. Its colour intensity is ops in the last sample, and an outline marks lock-wait above zero.
 
+  - **Memory limit control** on the memory tile: a form posting to POST `/settings/memory` with fields `maxmemory` (a Redis size string such as `4gb`, `512mb` or `0`) and `policy` (one of the eight Redis policies, chosen from a select). It runs `CONFIG SET maxmemory <v>` and `CONFIG SET maxmemory-policy <p>` through the browser session, requires CSRF, and writes an audit log line (`setting=maxmemory value=4gb`). It returns the refreshed tile, or the server's error reply inline (for example an invalid size). This is the only editing control in phase A.
 - [ ] **Step 1: Write failing tests.**
+  - `TestDashboard_SetMaxMemory`: POST `maxmemory=4gb&policy=allkeys-lru` with CSRF, then `CONFIG GET maxmemory` returns `4294967296` and the policy is `allkeys-lru`. `maxmemory=4zb` renders the inline error and leaves the setting unchanged. Without CSRF the request gets 403. The audit line is present.
   - `TestDashboard_SamplerRing`: with an injected tick, 305 samples leave 300 kept in order.
   - `TestDashboard_SSEEmitsTiles`: connecting to `/events/stats` with a valid session yields an `event: tiles` frame containing `ops/s` within 2 s. Disconnecting the client ends the handler goroutine (check the goroutine count is stable).
   - `TestDashboard_HitRateZeroDivision` renders "—".

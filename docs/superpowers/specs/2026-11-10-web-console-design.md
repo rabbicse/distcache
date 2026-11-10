@@ -101,6 +101,8 @@ flowchart LR
   - live SUBSCRIBE/PSUBSCRIBE over SSE on a dedicated internal session;
   - active channels with subscriber counts.
 
+- **Memory limit control** (added 2026-11-10): the dashboard memory tile edits `maxmemory` (such as 4gb) and `maxmemory-policy` per node via CONFIG SET, with CSRF and an audit line. This is the only editing control in phase A.
+
 ### Phase B
 - ACL users and roles. A `+@all` user is admin; a user without `+@write` is viewer, which hides edit controls. The server still enforces permissions, so hiding is only cosmetic.
 - Editing: create, edit and delete keys and change TTLs. Each change needs a confirmation step, and FLUSHDB/FLUSHALL need the database name typed in.
