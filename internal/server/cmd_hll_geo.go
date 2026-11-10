@@ -117,7 +117,9 @@ func cmdPFCount(c *Ctx) {
 			c.Err(errInvalidHLL)
 			return
 		}
-		c.W.WriteInt(int64(h.Count()))
+		n := h.Count()
+		c.cacheHLLCount(c.Arg(1), v, n)
+		c.W.WriteInt(int64(n))
 		return
 	}
 	acc := &ds.HLL{}
@@ -131,6 +133,24 @@ func cmdPFCount(c *Ctx) {
 		}
 	}
 	c.W.WriteInt(int64(acc.Count()))
+}
+
+// cacheHLLCount stores the cardinality n just computed for the HLL v at key
+// in its header, as pfcountCommand does, so GET after PFCOUNT returns the
+// same bytes as Redis; like Redis it counts as a change and propagates the
+// PFCOUNT. It needs write locks on key, which the top-level PFCOUNT
+// (FlagExclusive) and EXEC take; inside a script, which only holds read
+// locks, the cache is left invalid.
+func (c *Ctx) cacheHLLCount(key string, v []byte, n uint64) {
+	if !c.writeLocked {
+		return
+	}
+	c.DB.Preserve(key)
+	// Work on a copy: the stored slice may be shared with a snapshot.
+	b := slices.Clone(v)
+	ds.HLLSetCachedCount(b, n)
+	c.DB.SetValue(key, b, true)
+	c.Dirty(1)
 }
 
 // cmdPFMerge follows Redis's pfmergeCommand: the destination stays sparse

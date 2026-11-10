@@ -60,6 +60,10 @@ const (
 	FlagTxControl
 	// FlagNoPropagate: never written to AOF/replicas even if dirty.
 	FlagNoPropagate
+	// FlagExclusive takes write shard locks for a command that is not a
+	// write: PFCOUNT stores the cardinality it computes in the HLL header.
+	// It is internal and not reported by COMMAND INFO.
+	FlagExclusive
 )
 
 var flagNames = map[string]Flag{
@@ -68,7 +72,7 @@ var flagNames = map[string]Flag{
 	"stale": FlagStale, "skip_monitor": FlagSkipMonitor, "skip_slowlog": FlagSkipSlowlog, "fast": FlagFast,
 	"no_auth": FlagNoAuth, "may_replicate": FlagMayReplicate, "no_multi": FlagNoMulti,
 	"allow_busy": FlagAllowBusy, "global": FlagGlobal, "lockall": FlagLockAll, "txctl": FlagTxControl,
-	"noprop": FlagNoPropagate,
+	"noprop": FlagNoPropagate, "exclusive": FlagExclusive,
 }
 
 // Handler executes a command.
@@ -151,9 +155,12 @@ type Ctx struct {
 	propSet  bool
 	keys     []string
 	allLocks bool // every shard is already locked (EXEC/script)
-	inMulti  bool
-	inScript bool
-	isMaster bool // replication stream from our master
+	// writeLocked reports that the shard locks held for this command are
+	// write locks, so a non-write command (FlagExclusive) may mutate values.
+	writeLocked bool
+	inMulti     bool
+	inScript    bool
+	isMaster    bool // replication stream from our master
 
 	// blocking support
 	canBlock        bool
@@ -180,6 +187,9 @@ type executionUnit struct {
 	db       int
 	commands []propagatedCommand
 	writes   int
+	// writeLocked is set by EXEC when it took write locks, so the queued
+	// commands' contexts know they may mutate (see Ctx.writeLocked).
+	writeLocked bool
 }
 
 // propagatedCommand is one command queued in an executionUnit together with

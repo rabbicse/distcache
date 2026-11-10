@@ -212,7 +212,7 @@ func (s *Server) registerCommands() {
 		{"xinfo", -2, "readonly", 2, 2, 1, "stream", cmdXInfo, nil},
 		// hyperloglog
 		{"pfadd", -2, "write denyoom fast", 1, 1, 1, "hyperloglog", cmdPFAdd, nil},
-		{"pfcount", -2, "readonly", 1, -1, 1, "hyperloglog", cmdPFCount, nil},
+		{"pfcount", -2, "readonly may_replicate exclusive", 1, -1, 1, "hyperloglog", cmdPFCount, nil},
 		{"pfmerge", -2, "write denyoom", 1, -1, 1, "hyperloglog", cmdPFMerge, nil},
 		// geo
 		{"geoadd", -5, "write denyoom", 1, 1, 1, "geo", cmdGeoAdd, nil},

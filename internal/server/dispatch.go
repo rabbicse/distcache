@@ -221,8 +221,13 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 
 	if locked {
 		ctx.unit = unit
+		ctx.writeLocked = unit.writeLocked && !inScript
 		s.runHandler(ctx)
 	} else {
+		// lockWrite is the shard lock mode; write still decides everything
+		// else (snapshot barrier, propagation, write stats).
+		lockWrite := write || cmd.Has(FlagExclusive)
+		ctx.writeLocked = lockWrite
 		ctx.unit = &executionUnit{db: -1}
 		barrier := lockAll && (write || cmd.Has(FlagLockAll))
 		if barrier {
@@ -232,12 +237,12 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 		var shardBuf [8]int
 		hasLocks := false
 		if lockAll {
-			s.keyspace.LockAll(write)
+			s.keyspace.LockAll(lockWrite)
 			ctx.allLocks = true
 			hasLocks = true
 		} else if len(keys) > 0 {
 			idx = s.keyspace.ShardSet(keys, shardBuf[:0])
-			s.keyspace.Lock(idx, write)
+			s.keyspace.Lock(idx, lockWrite)
 			hasLocks = true
 		}
 		// waiter is registered on the first block and kept across retries so
@@ -266,9 +271,9 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 			s.flushUnit(ctx)
 			if hasLocks {
 				if lockAll {
-					s.keyspace.UnlockAll(write)
+					s.keyspace.UnlockAll(lockWrite)
 				} else {
-					s.keyspace.Unlock(idx, write)
+					s.keyspace.Unlock(idx, lockWrite)
 				}
 			}
 			outcome := s.waitBlocked(c, waiter, ctx)
@@ -282,9 +287,9 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 				break
 			}
 			if lockAll {
-				s.keyspace.LockAll(write)
+				s.keyspace.LockAll(lockWrite)
 			} else {
-				s.keyspace.Lock(idx, write)
+				s.keyspace.Lock(idx, lockWrite)
 			}
 			ctx.blocked = false
 			ctx.dirty = 0
@@ -295,9 +300,9 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 		s.flushUnit(ctx)
 		if hasLocks {
 			if lockAll {
-				s.keyspace.UnlockAll(write)
+				s.keyspace.UnlockAll(lockWrite)
 			} else {
-				s.keyspace.Unlock(idx, write)
+				s.keyspace.Unlock(idx, lockWrite)
 			}
 		}
 		if barrier {

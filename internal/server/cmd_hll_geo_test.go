@@ -31,6 +31,8 @@ var hllScript = []testutil.Step{
 	testutil.S(":1", "PFADD", "h", "a", "b", "c"),
 	testutil.S(":0", "PFADD", "h", "a", "b"),
 	testutil.S(":3", "PFCOUNT", "h"),
+	// PFCOUNT stored the cardinality in the header, so GET sees it (B24).
+	testutil.S(`"HYLL\x01\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00`+"`"+`\xf3\x80P\xb1\x84K\xfb\x80BZ"`, "GET", "h"),
 	testutil.S(":1", "PFADD", "h2", "c", "d", "e"),
 	testutil.S(":5", "PFCOUNT", "h", "h2"),
 	testutil.S(":5", "PFCOUNT", "h", "h2", "missing"),
@@ -239,4 +241,55 @@ func TestHllGeoCommands_GeoAddXXNX(t *testing.T) {
 		testutil.S(errSyntax, "GEOADD", "g", "XX", "NX", "1", "1", "x"),
 		testutil.S(errSyntax, "GEOADD", "g", "1", "2", "m", "3"),
 	})
+}
+
+// TestHllGeoCommands_PFCountCachesCardinality checks PFCOUNT stores the
+// cardinality in header bytes 8..15 (little-endian, the invalid flag in the
+// MSB of byte 15 cleared) like Redis's pfcountCommand, both standalone and
+// inside MULTI (B24).
+func TestHllGeoCommands_PFCountCachesCardinality(t *testing.T) {
+	_, addr := testutil.StartServer(t, nil)
+	c := testutil.MustDial(t, addr)
+	get := func(key string) []byte {
+		t.Helper()
+		v, err := c.Do("GET", key)
+		if err != nil {
+			t.Fatalf("GET %s: %v", key, err)
+		}
+		return v.Str
+	}
+	for _, tc := range []struct {
+		name  string
+		key   string
+		multi bool
+	}{
+		{"standalone", "h", false},
+		{"multi", "hm", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.RunScript(t, c, []testutil.Step{testutil.S(":1", "PFADD", tc.key, "a", "b", "c")})
+			before := get(tc.key)
+			if before[15]&0x80 == 0 {
+				t.Fatalf("PFADD: got header byte 15 %#x, want the invalid flag set", before[15])
+			}
+			if tc.multi {
+				testutil.RunScript(t, c, []testutil.Step{
+					testutil.S("+OK", "MULTI"),
+					testutil.S("+QUEUED", "PFCOUNT", tc.key),
+					testutil.S("*[:3]", "EXEC"),
+				})
+			} else {
+				testutil.RunScript(t, c, []testutil.Step{testutil.S(":3", "PFCOUNT", tc.key)})
+			}
+			want := append([]byte(nil), before...)
+			copy(want[8:16], []byte{3, 0, 0, 0, 0, 0, 0, 0})
+			if got := get(tc.key); string(got) != string(want) {
+				t.Fatalf("GET after PFCOUNT: got %q, want %q", got, want)
+			}
+			testutil.RunScript(t, c, []testutil.Step{
+				testutil.S(":1", "PFADD", tc.key, "d"),
+				testutil.S(":4", "PFCOUNT", tc.key),
+			})
+		})
+	}
 }

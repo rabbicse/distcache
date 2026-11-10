@@ -299,6 +299,10 @@ func HLLCachedCount(b []byte) (uint64, bool) {
 	return binary.LittleEndian.Uint64(b[8:16]), true
 }
 
+// HLLSetCachedCount stores n as the cached cardinality in the header and
+// marks it valid, as pfcountCommand does (little-endian in bytes 8..15).
+func HLLSetCachedCount(b []byte, n uint64) { binary.LittleEndian.PutUint64(b[8:16], n) }
+
 // HLLAdd adds ele to the HLL string b (which the caller owns and which may be
 // modified in place) like Redis's hllAdd. It returns the possibly
 // reallocated string and 1 if a register changed, 0 if not, or -1 if b is a

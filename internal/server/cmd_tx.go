@@ -82,7 +82,7 @@ func cmdExec(c *Ctx) {
 		if all || q.cmd.Has(FlagGlobal) {
 			lockAll = true
 		}
-		if q.cmd.Has(FlagWrite) {
+		if q.cmd.Has(FlagWrite) || q.cmd.Has(FlagExclusive) {
 			write = true
 		}
 		keys = append(keys, ks...)
@@ -108,7 +108,7 @@ func cmdExec(c *Ctx) {
 		c.W.WriteNullArray()
 		return
 	}
-	unit := &executionUnit{db: -1}
+	unit := &executionUnit{db: -1, writeLocked: write}
 	c.W.WriteArrayLen(len(m.cmds))
 	for _, q := range m.cmds {
 		if q.cmd.Has(FlagWrite) && s.replication.isReplica() && s.cfg.ReplicaReadOnly.Load() && !cl.isMaster {
