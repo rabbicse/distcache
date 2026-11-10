@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/logo.svg" alt="DistCache" width="320"></p>
+
 # DistCache
 
 DistCache is a Redis-compatible in-memory server written in Go. It targets Redis 8.4 command semantics and replies, uses only the Go standard library (including its own Lua 5.1 interpreter), and runs on Linux and macOS (Windows is deferred). Unlike Redis, which executes commands on one thread, DistCache executes them concurrently across a sharded keyspace so a single node can use every core. Any Redis client should work unchanged.
