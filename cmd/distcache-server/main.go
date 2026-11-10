@@ -13,8 +13,8 @@ import (
 	"syscall"
 
 	"github.com/rabbicse/distcache/internal/config"
+	"github.com/rabbicse/distcache/internal/logger"
 	"github.com/rabbicse/distcache/internal/server"
-	"github.com/rabbicse/distcache/pkg/logger"
 )
 
 func main() {

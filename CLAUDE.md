@@ -19,7 +19,7 @@ go run ./cmd/distcache-server --port 6380 --appendonly yes
 go run ./cmd/distcache-server /path/to/distcache.conf --maxmemory 2gb
 ```
 
-`cmd/server` is a backward-compat duplicate of `cmd/distcache-server` (kept for `go run cmd/server/main.go`); keep the two in sync. Configuration is redis.conf-style files and redis-server-style `--name value` args (plus legacy `-listenAddr host:port`), parsed in [internal/config/config.go](internal/config/config.go). Default port 6379, snapshot file `dump.dcs`, AOF `appendonly.aof`.
+Layout follows Go convention (no `src/`): binaries in `cmd/`, all core code in `internal/`, end-to-end tests in `test/e2e` (own module), client examples in `examples/<lang>` (each its own project), React console in `web/console` (planned), Docker files in `deploy/docker`, scripts in `scripts/`. Configuration is redis.conf-style files and redis-server-style `--name value` args (plus legacy `-listenAddr host:port`), parsed in [internal/config/config.go](internal/config/config.go). Default port 6379, snapshot file `dump.dcs`, AOF `appendonly.aof`.
 
 Integration tests should use [internal/testutil](internal/testutil/client.go): `StartServer(t, mutate)` boots an in-process server on a random port with a temp dir; `StartRedis(t)` starts a real `redis-server` (if on PATH, unless `DISTCACHE_SKIP_REDIS` is set) for side-by-side reply comparison via `Render`/`DoS`.
 

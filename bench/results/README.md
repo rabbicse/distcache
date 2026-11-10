@@ -1,6 +1,6 @@
 # Benchmark results
 
-Each file is `<date>-<host>.md`, written by `make bench` (`bench/run.sh`).
+Each file is `<date>-<host>.md`, written by `make bench` (`scripts/bench.sh`).
 
 The matrix is pipeline `{1, 16}` x clients `{50, 500}`, running
 `set,get,incr,lpush,sadd,hset,zadd` with `-n 1000000 -r 100000`. DistCache runs
@@ -14,7 +14,7 @@ percentiles are per pipeline batch, not per command.
 The earliest file is the baseline later performance work must beat. Compare
 only results from the same machine.
 
-## Environment variables for `bench/run.sh`
+## Environment variables for `scripts/bench.sh`
 
 - `BENCH_N`: requests per test (default 1000000).
 - `BENCH_PREBUILT=1`: skip `go build` and use the existing `bin/` binaries,

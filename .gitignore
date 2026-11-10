@@ -34,3 +34,5 @@ go.work.sum
 # Build output
 bin/
 coverage.html
+dump.dcs
+appendonly.aof

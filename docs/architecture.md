@@ -149,14 +149,17 @@ so a restarted replica always does a full resync.
 
 | Layer | Package / file |
 |---|---|
-| Entry points | `cmd/distcache-server`, `cmd/server` (compat), `cmd/distcache-bench` |
-| Config (live, atomics) | `internal/config` |
+| Entry points | `cmd/distcache-server`, `cmd/distcache-bench` |
+| Config (live, atomics), logging | `internal/config`, `internal/logger` |
 | Wire protocol | `internal/resp` |
 | Connection, dispatch, commands | `internal/server` (`client.go`, `dispatch.go`, `commands.go`, `cmd_*.go`) |
 | Keyspace, eviction, codec | `internal/storage` |
 | Data structures | `internal/ds` (list, hash, set, zset, stream, HLL, geo, glob) |
 | Scripting | `internal/lua`, `internal/server/scripting.go` |
 | Test helpers | `internal/testutil`, `test/e2e` |
+| Client examples | `examples/` (Go, Java, Python, Node) |
+| Web console (planned) | `web/console` |
+| Deployment, scripts | `deploy/docker`, `scripts/bench.sh` |
 
 ## 7. Where this is heading
 

@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/rabbicse/distcache/internal/config"
+	"github.com/rabbicse/distcache/internal/logger"
 	"github.com/rabbicse/distcache/internal/storage"
-	"github.com/rabbicse/distcache/pkg/logger"
 )
 
 // Version is the DistCache version. RedisVersion is the Redis version whose

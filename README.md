@@ -97,7 +97,7 @@ clustercache
 ## Run Locally
 
 ```
-go run cmd/server/main.go
+go run ./cmd/distcache-server
 ```
 
 Server starts on:
