@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -194,29 +193,11 @@ func secondArg(args [][]byte) ([]byte, bool) {
 	return args[1], true
 }
 
-// blockOption: XREAD and XREADGROUP take "BLOCK ms" among their options,
-// which end at the STREAMS keyword. Option values (COUNT n, GROUP group
-// consumer) are skipped so a group or consumer named BLOCK or STREAMS is not
-// mistaken for the keyword.
+// blockOption: XREAD and XREADGROUP take "BLOCK ms" among their options; the
+// last one wins, exactly as in the handler (see scanXReadOptions).
 func blockOption(args [][]byte) ([]byte, bool) {
-	for i := 1; i < len(args); {
-		switch strings.ToUpper(string(args[i])) {
-		case "STREAMS":
-			return nil, false
-		case "BLOCK":
-			if i+1 < len(args) {
-				return args[i+1], true
-			}
-			return nil, false
-		case "GROUP":
-			i += 3
-		case "COUNT":
-			i += 2
-		default:
-			i++
-		}
-	}
-	return nil, false
+	_, block, ok := scanXReadOptions(args)
+	return block, ok
 }
 
 // blockingTimeoutRules maps each FlagBlocking command to where its timeout

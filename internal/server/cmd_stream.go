@@ -532,21 +532,57 @@ type xreadState struct {
 	ids []ds.StreamID
 }
 
-func xreadKeys(args [][]byte) ([]int, bool) {
+// scanXReadOptions walks the XREAD/XREADGROUP options the way xreadGeneric
+// does: COUNT n, BLOCK ms, GROUP group consumer and NOACK precede the
+// STREAMS keyword, and option values are never taken for keywords. It
+// returns the index of STREAMS (-1 when absent or the options are malformed)
+// and the last BLOCK value, which is the one the handler honours.
+func scanXReadOptions(args [][]byte) (streamsPos int, block []byte, hasBlock bool) {
 	for i := 1; i < len(args); i++ {
-		if strings.EqualFold(string(args[i]), "streams") {
-			rest := len(args) - i - 1
-			if rest%2 != 0 {
-				return nil, false
+		left := len(args) - i - 1
+		switch opt := strings.ToLower(string(args[i])); {
+		case (opt == "count" || opt == "block") && left >= 1:
+			if opt == "block" {
+				block, hasBlock = args[i+1], true
 			}
-			var pos []int
-			for j := 0; j < rest/2; j++ {
-				pos = append(pos, i+1+j)
-			}
-			return pos, false
+			i++
+		case opt == "streams" && left >= 1:
+			return i, block, hasBlock
+		case opt == "group" && left >= 2:
+			i += 2
+		case opt == "noack":
+		default:
+			return -1, block, hasBlock
 		}
 	}
-	return nil, false
+	return -1, block, hasBlock
+}
+
+// XReadBlockArg returns the BLOCK value XREAD or XREADGROUP would use for
+// args (command name first), if any.
+func XReadBlockArg(args []string) (string, bool) {
+	argv := make([][]byte, len(args))
+	for i, a := range args {
+		argv[i] = []byte(a)
+	}
+	_, block, ok := scanXReadOptions(argv)
+	return string(block), ok
+}
+
+func xreadKeys(args [][]byte) ([]int, bool) {
+	i, _, _ := scanXReadOptions(args)
+	if i < 0 {
+		return nil, false
+	}
+	rest := len(args) - i - 1
+	if rest%2 != 0 {
+		return nil, false
+	}
+	pos := make([]int, 0, rest/2)
+	for j := 0; j < rest/2; j++ {
+		pos = append(pos, i+1+j)
+	}
+	return pos, false
 }
 
 func cmdXRead(c *Ctx)      { xreadGeneric(c, false) }

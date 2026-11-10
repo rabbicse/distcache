@@ -522,3 +522,38 @@ func TestConsole_AuditUnknownCommandName(t *testing.T) {
 		t.Fatalf("log: %q", out)
 	}
 }
+
+func TestConsole_XReadLastBlockWins(t *testing.T) {
+	e := newConsoleEnv(t)
+	for _, line := range []string{
+		"XREAD BLOCK 1 BLOCK 0 STREAMS s $",
+		"XREAD BLOCK 1 BLOCK 999999 STREAMS s $",
+	} {
+		if out := e.exec(t, line); !strings.Contains(out, "not allowed") {
+			t.Errorf("%q: got %s, want refusal", line, out)
+		}
+	}
+	if out := e.exec(t, "XREAD BLOCK 999999 BLOCK 1 STREAMS s $"); strings.Contains(out, "not allowed") {
+		t.Errorf("last BLOCK 1 refused: %s", out)
+	}
+}
+
+func TestConsole_RedactsACLAndMigrate(t *testing.T) {
+	e := newConsoleEnv(t)
+	for _, line := range []string{
+		"ACL SETUSER bob on >hunter2 +@all",
+		"ACL SETUSER bob #5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
+		"MIGRATE 127.0.0.1 1 k 0 10 AUTH hunter2",
+		"MIGRATE 127.0.0.1 1 k 0 10 AUTH2 u hunter2",
+	} {
+		out := e.exec(t, line)
+		if strings.Contains(out, "hunter2") || strings.Contains(out, "5e8848") {
+			t.Errorf("%q: secret rendered: %s", line, out)
+		}
+	}
+	for _, h := range e.s.historyCopy() {
+		if strings.Contains(h, "hunter2") || strings.Contains(h, "5e8848") {
+			t.Errorf("secret in history: %q", h)
+		}
+	}
+}

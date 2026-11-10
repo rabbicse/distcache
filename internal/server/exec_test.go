@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -266,4 +267,59 @@ func TestServer_CommandKeyCount(t *testing.T) {
 	if got := s.CommandName("hunter2"); got != "" {
 		t.Errorf("CommandName unknown: got %q", got)
 	}
+}
+
+func TestExec_XReadLastBlockWins(t *testing.T) {
+	s := newExecServer(t)
+	if _, err := s.Exec("XREAD", "BLOCK", "1", "BLOCK", "0", "STREAMS", "s", "$"); !errors.Is(err, ErrWouldBlock) {
+		t.Errorf("got %v, want ErrWouldBlock", err)
+	}
+	if v, ok := XReadBlockArg([]string{"XREAD", "BLOCK", "1", "BLOCK", "999999", "STREAMS", "s", "$"}); !ok || v != "999999" {
+		t.Errorf("got %q %v, want 999999", v, ok)
+	}
+}
+
+func TestXRead_KeysSkipOptionValues(t *testing.T) {
+	s := newExecServer(t)
+	v, err := s.Exec("COMMAND", "GETKEYS", "XREADGROUP", "GROUP", "streams", "c", "STREAMS", "s", ">")
+	if err != nil || len(v.Elems) != 1 || string(v.Elems[0].Str) != "s" {
+		t.Fatalf("got %+v %v, want [s]", v, err)
+	}
+	v, err = s.Exec("COMMAND", "GETKEYS", "XREAD", "COUNT", "1", "BLOCK", "5", "STREAMS", "a", "b", "0", "0")
+	if err != nil || len(v.Elems) != 2 || string(v.Elems[0].Str) != "a" || string(v.Elems[1].Str) != "b" {
+		t.Fatalf("got %+v %v, want [a b]", v, err)
+	}
+}
+
+func TestXReadGroup_GroupNamedStreamsConcurrentWriters(t *testing.T) {
+	s := newExecServer(t)
+	mustExec(t, s.NewSession(), "XGROUP", "CREATE", "s", "streams", "$", "MKSTREAM")
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ss := s.NewSession()
+			defer ss.Close()
+			for range 100 {
+				if _, err := ss.Exec("XADD", "s", "*", "f", "v"); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ss := s.NewSession()
+		defer ss.Close()
+		for range 100 {
+			if _, err := ss.Exec("XREADGROUP", "GROUP", "streams", "c", "COUNT", "10", "STREAMS", "s", ">"); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }

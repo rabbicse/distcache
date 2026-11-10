@@ -87,25 +87,14 @@ func secs(a []string, i int, perUnit float64) (float64, bool) {
 
 func lastArgSecs(a []string) (float64, bool) { return secs(a, len(a)-1, 1) }
 
-// blockSecs finds BLOCK <ms> among the XREAD/XREADGROUP options. Option
-// values (COUNT n, GROUP group consumer) are skipped so names equal to BLOCK
-// or STREAMS are not misread; the options end at STREAMS.
+// blockSecs returns the BLOCK wait the server would honour for
+// XREAD/XREADGROUP (the last BLOCK option), in seconds.
 func blockSecs(a []string) (float64, bool) {
-	for i := 1; i < len(a); {
-		switch strings.ToUpper(a[i]) {
-		case "STREAMS":
-			return 0, false
-		case "BLOCK":
-			return secs(a, i+1, 1000)
-		case "GROUP":
-			i += 3
-		case "COUNT":
-			i += 2
-		default:
-			i++
-		}
+	v, ok := server.XReadBlockArg(a)
+	if !ok {
+		return 0, false
 	}
-	return 0, false
+	return secs([]string{v}, 0, 1000)
 }
 
 // denyReason reports why the console refuses args, if it does.
@@ -292,7 +281,12 @@ func (c *Console) handleExec(w http.ResponseWriter, r *http.Request) {
 		c.log.Warn("web cmd exec", "err", err)
 		c.writeEntry(w, s, errorEntry(shown, "internal error running the command"))
 	default:
-		c.writeEntry(w, s, replyEntry{Cmd: shown, Reply: viewOf(v), Hist: shown})
+		view := viewOf(v)
+		if shown != line && view.Kind == "error" {
+			// "unknown command ... with args beginning with" echoes the arguments.
+			view.Text, _, _ = strings.Cut(view.Text, ", with args beginning with")
+		}
+		c.writeEntry(w, s, replyEntry{Cmd: shown, Reply: view, Hist: shown})
 	}
 }
 
@@ -303,6 +297,16 @@ func redactLine(args []string, line string) string {
 	switch name {
 	case "AUTH", "HELLO":
 		return name + " ...(redacted)"
+	case "ACL":
+		if len(args) > 1 && strings.EqualFold(args[1], "SETUSER") {
+			return "ACL SETUSER ...(redacted)"
+		}
+	case "MIGRATE":
+		for _, a := range args[1:] {
+			if strings.EqualFold(a, "AUTH") || strings.EqualFold(a, "AUTH2") {
+				return "MIGRATE ...(redacted)"
+			}
+		}
 	case "CONFIG":
 		if len(args) > 2 && strings.EqualFold(args[1], "SET") {
 			for _, k := range args[2:] {
