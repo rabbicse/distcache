@@ -1,3 +1,5 @@
+// EVAL/EVALSHA, SCRIPT and FUNCTION on the embedded Lua interpreter.
+
 package server
 
 import (

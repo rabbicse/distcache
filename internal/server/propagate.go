@@ -1,3 +1,5 @@
+// Ordered propagation of write effects to the AOF, backlog and replicas.
+
 package server
 
 import (

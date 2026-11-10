@@ -1,3 +1,5 @@
+// Generic keyspace commands: DEL, EXISTS, EXPIRE, TTL, RENAME, SCAN ...
+
 package server
 
 import (

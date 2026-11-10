@@ -1,3 +1,5 @@
+// Master/replica replication with PSYNC-style partial resync.
+
 package server
 
 import (

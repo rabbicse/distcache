@@ -1,3 +1,5 @@
+// Per-connection client state and the read/dispatch/reply loop.
+
 package server
 
 import (

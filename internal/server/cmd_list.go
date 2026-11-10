@@ -1,3 +1,5 @@
+// List commands, including the blocking variants.
+
 package server
 
 import (

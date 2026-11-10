@@ -1,3 +1,5 @@
+// Command table registration and COMMAND introspection.
+
 package server
 
 import (
@@ -7,6 +9,9 @@ import (
 	"github.com/rabbicse/distcache/internal/config"
 )
 
+// commandSpec is one command-table row; addCommand turns it into a *Command.
+// The flag string and key positions drive locking and propagation, so they
+// must match Redis exactly.
 type commandSpec struct {
 	name        string
 	arity       int

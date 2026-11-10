@@ -1,3 +1,5 @@
+// Bitmap commands: SETBIT, GETBIT, BITCOUNT, BITPOS, BITOP, BITFIELD.
+
 package server
 
 import (

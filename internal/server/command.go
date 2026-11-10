@@ -1,3 +1,5 @@
+// Command descriptors, flags and the per-invocation Ctx passed to handlers.
+
 package server
 
 import (
@@ -16,21 +18,37 @@ import (
 type Flag uint64
 
 const (
+	// FlagWrite marks a command that may modify the dataset (write shard locks, propagation).
 	FlagWrite Flag = 1 << iota
+	// FlagReadonly marks a command that only reads data (read shard locks).
 	FlagReadonly
+	// FlagDenyOOM rejects the command with OOM when maxmemory is exceeded after eviction.
 	FlagDenyOOM
+	// FlagAdmin marks administrative commands (CONFIG, DEBUG, SHUTDOWN ...).
 	FlagAdmin
+	// FlagPubSub marks Pub/Sub commands, which are allowed in subscribed RESP2 context.
 	FlagPubSub
+	// FlagNoScript forbids the command inside Lua scripts and functions.
 	FlagNoScript
+	// FlagBlocking marks a command that may block the client (BLPOP, XREAD BLOCK ...).
 	FlagBlocking
+	// FlagLoading allows the command while the dataset is loading.
 	FlagLoading
+	// FlagStale allows the command on a replica with a stale link to its master.
 	FlagStale
+	// FlagSkipMonitor hides the command from MONITOR output.
 	FlagSkipMonitor
+	// FlagSkipSlowlog excludes the command from the slow log.
 	FlagSkipSlowlog
+	// FlagFast marks an O(1) or O(log N) command (Redis "fast").
 	FlagFast
+	// FlagNoAuth allows the command before the client has authenticated.
 	FlagNoAuth
+	// FlagMayReplicate marks a command that may propagate effects although not a write.
 	FlagMayReplicate
+	// FlagNoMulti forbids queueing the command inside MULTI.
 	FlagNoMulti
+	// FlagAllowBusy allows the command while a script is running (BUSY state).
 	FlagAllowBusy
 	// FlagGlobal: the handler walks the whole keyspace and locks shards
 	// itself when executed standalone (KEYS, SCAN, RANDOMKEY ...).
@@ -164,6 +182,8 @@ type executionUnit struct {
 	writes   int
 }
 
+// propagatedCommand is one command queued in an executionUnit together with
+// the database it must be replayed in.
 type propagatedCommand struct {
 	db   int
 	args [][]byte

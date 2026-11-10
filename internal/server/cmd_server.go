@@ -1,3 +1,5 @@
+// Connection and server commands: PING, AUTH, HELLO, CLIENT, CONFIG, INFO, DEBUG ...
+
 package server
 
 import (

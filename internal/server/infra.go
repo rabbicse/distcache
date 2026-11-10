@@ -1,3 +1,5 @@
+// Shared server infrastructure: blocking-command waiters, WATCH registry, slow log and subcommand helpers.
+
 package server
 
 import (

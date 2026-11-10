@@ -64,14 +64,14 @@ type stats struct {
 // Server is a DistCache instance.
 type Server struct {
 	cfg      *config.Config
-	keyspace *storage.Keyspace
+	keyspace *storage.Keyspace // sharded data; callers hold shard locks
 	log      *slog.Logger
 	commands map[string]*Command
 
-	lnMu      sync.Mutex
+	lnMu      sync.Mutex // guards listeners
 	listeners []net.Listener
 
-	clientsMu sync.RWMutex
+	clientsMu sync.RWMutex // guards clients
 	clients   map[int64]*Client
 	nextID    atomic.Int64
 
@@ -84,7 +84,7 @@ type Server struct {
 	scripts     *scriptEngine
 	slowlog     *slowlog
 
-	monitorsMu sync.RWMutex
+	monitorsMu sync.RWMutex // guards monitors
 	monitors   map[*Client]struct{}
 	monitorN   atomic.Int32
 

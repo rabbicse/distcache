@@ -1,3 +1,5 @@
+// Snapshot (SAVE/BGSAVE), AOF loading, rewriting and startup recovery.
+
 package server
 
 import (

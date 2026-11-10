@@ -1,3 +1,5 @@
+// Transaction commands: MULTI, EXEC, DISCARD, WATCH, UNWATCH.
+
 package server
 
 type queuedCmd struct {

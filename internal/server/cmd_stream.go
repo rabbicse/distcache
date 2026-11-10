@@ -1,3 +1,5 @@
+// Stream commands: XADD, XRANGE, XREAD, consumer groups and trimming.
+
 package server
 
 import (

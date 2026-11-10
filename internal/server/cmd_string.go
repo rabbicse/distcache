@@ -1,3 +1,5 @@
+// String commands: GET, SET and variants, counters, ranges.
+
 package server
 
 import (

@@ -1,3 +1,5 @@
+// HyperLogLog (PF*) and GEO commands.
+
 package server
 
 import (

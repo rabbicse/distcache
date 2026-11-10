@@ -1,3 +1,5 @@
+// Pub/Sub channels, patterns, shard channels and keyspace notifications.
+
 package server
 
 import (

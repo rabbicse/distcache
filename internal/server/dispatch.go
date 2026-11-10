@@ -1,3 +1,5 @@
+// Command dispatch: pre-exec checks, shard locking and post-exec side effects.
+
 package server
 
 import (

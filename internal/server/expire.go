@@ -1,3 +1,5 @@
+// Active expiry cycle and maxmemory eviction.
+
 package server
 
 import (
