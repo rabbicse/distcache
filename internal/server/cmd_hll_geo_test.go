@@ -176,6 +176,27 @@ func TestHllGeoCommands_SparseEncoding(t *testing.T) {
 	})
 }
 
+// TestHllGeoCommands_SparseMaxBytes checks hll-sparse-max-bytes moves the
+// sparse-to-dense promotion point (B25).
+func TestHllGeoCommands_SparseMaxBytes(t *testing.T) {
+	_, addr := testutil.StartServer(t, nil)
+	testutil.RunScript(t, testutil.MustDial(t, addr), []testutil.Step{
+		testutil.S(`*["hll-sparse-max-bytes", "3000"]`, "CONFIG", "GET", "hll-sparse-max-bytes"),
+		testutil.S(":1", "PFADD", "keep", "a", "b", "c"),
+		testutil.S(`"\x01"`, "GETRANGE", "keep", "4", "4"),
+		testutil.S(":1", "PFADD", "src", "x"),
+		testutil.S("+OK", "CONFIG", "SET", "hll-sparse-max-bytes", "0"),
+		testutil.S(`*["hll-sparse-max-bytes", "0"]`, "CONFIG", "GET", "hll-sparse-max-bytes"),
+		testutil.S(":1", "PFADD", "h", "a"),
+		testutil.S(`"\x00"`, "GETRANGE", "h", "4", "4"),
+		testutil.S(":3", "PFCOUNT", "keep"),
+		testutil.S(":1", "PFADD", "keep", "d"),
+		testutil.S(`"\x00"`, "GETRANGE", "keep", "4", "4"),
+		testutil.S("+OK", "PFMERGE", "m", "src"),
+		testutil.S(`"\x00"`, "GETRANGE", "m", "4", "4"),
+	})
+}
+
 // TestHllGeoCommands_DenseEstimate checks the dense-HLL estimates of
 // hllDenseScript against the true cardinalities within 3% (the standard
 // error of a 16384-register HLL is 0.81%).

@@ -29,7 +29,8 @@ const (
 	hllAlphaInf  = 0.721347520444481703680
 
 	// HLLSparseMaxBytes is Redis's default hll-sparse-max-bytes: a sparse
-	// HLL that would grow past it is promoted to dense.
+	// HLL that would grow past it is promoted to dense. The live value is
+	// passed to HLLAdd and HLLSet.
 	HLLSparseMaxBytes = 3000
 
 	hllSparseValMaxValue = 32
@@ -301,19 +302,20 @@ func HLLCachedCount(b []byte) (uint64, bool) {
 // HLLAdd adds ele to the HLL string b (which the caller owns and which may be
 // modified in place) like Redis's hllAdd. It returns the possibly
 // reallocated string and 1 if a register changed, 0 if not, or -1 if b is a
-// corrupt sparse HLL.
-func HLLAdd(b, ele []byte) ([]byte, int) {
+// corrupt sparse HLL. A sparse b is promoted to dense when an edit would grow
+// it past sparseMax bytes (hll-sparse-max-bytes).
+func HLLAdd(b, ele []byte, sparseMax int) ([]byte, int) {
 	idx, count := hllPatLen(ele)
-	return HLLSet(b, idx, count)
+	return HLLSet(b, idx, count, sparseMax)
 }
 
 // HLLSet raises register index to count if it is lower, with the same
 // results as HLLAdd.
-func HLLSet(b []byte, index int, count uint8) ([]byte, int) {
+func HLLSet(b []byte, index int, count uint8, sparseMax int) ([]byte, int) {
 	if b[4] == hllDense {
 		return b, denseSet(b[hllHdrSize:], index, count)
 	}
-	return sparseSet(b, index, count)
+	return sparseSet(b, index, count, sparseMax)
 }
 
 // HLLToDense converts a sparse HLL string to dense like hllSparseToDense,
@@ -408,7 +410,7 @@ func appendZeroRun(seq []byte, n int) []byte {
 
 // sparseSet is a port of Redis's hllSparseSet. The resulting bytes match
 // Redis's for the same sequence of updates.
-func sparseSet(b []byte, index int, count uint8) ([]byte, int) {
+func sparseSet(b []byte, index int, count uint8, sparseMax int) ([]byte, int) {
 	if count > hllSparseValMaxValue {
 		return promoteSet(b, index, count)
 	}
@@ -492,7 +494,7 @@ func sparseSet(b []byte, index int, count uint8) ([]byte, int) {
 		oldlen = 2
 	}
 	delta := len(seq) - oldlen
-	if delta > 0 && len(b)+delta > HLLSparseMaxBytes {
+	if delta > 0 && len(b)+delta > sparseMax {
 		return promoteSet(b, index, count)
 	}
 	tail := b[min(p+oldlen, end):]

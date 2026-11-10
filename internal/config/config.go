@@ -89,6 +89,9 @@ type Config struct {
 	HashMaxEntries      atomic.Int64
 	HashMaxValue        atomic.Int64
 	SetMaxIntset        atomic.Int64
+	// HLLSparseMaxBytes is hll-sparse-max-bytes: the size past which a
+	// sparse HyperLogLog is promoted to dense.
+	HLLSparseMaxBytes atomic.Int64
 	SetMaxEntries       atomic.Int64
 	SetMaxValue         atomic.Int64
 	ZSetMaxEntries      atomic.Int64
@@ -236,6 +239,7 @@ func Default() *Config {
 	c.HashMaxEntries.Store(128)
 	c.HashMaxValue.Store(64)
 	c.SetMaxIntset.Store(512)
+	c.HLLSparseMaxBytes.Store(3000)
 	c.SetMaxEntries.Store(128)
 	c.SetMaxValue.Store(64)
 	c.ZSetMaxEntries.Store(128)
@@ -351,7 +355,7 @@ var ignoredParams = []string{"protected-mode", "daemonize", "supervised", "tcp-b
 	"replica-lazy-flush", "lazyfree-lazy-user-flush", "oom-score-adj", "oom-score-adj-values",
 	"disable-thp", "aof-load-truncated", "aof-use-rdb-preamble", "aof-timestamp-enabled",
 	"no-appendfsync-on-rewrite", "auto-aof-rewrite-percentage", "auto-aof-rewrite-min-size",
-	"latency-monitor-threshold", "list-compress-depth", "hll-sparse-max-bytes", "stream-node-max-bytes",
+	"latency-monitor-threshold", "list-compress-depth", "stream-node-max-bytes",
 	"stream-node-max-entries", "activerehashing", "dynamic-hz", "aof-rewrite-incremental-fsync",
 	"rdb-save-incremental-fsync", "jemalloc-bg-thread", "activedefrag", "crash-log-enabled",
 	"crash-memcheck-enabled", "syslog-enabled", "syslog-ident", "syslog-facility", "enable-debug-command",
@@ -473,6 +477,7 @@ func (c *Config) registerParams() {
 	c.intParam("hash-max-ziplist-entries", &c.HashMaxEntries, 0, 1<<62)
 	c.intParam("hash-max-ziplist-value", &c.HashMaxValue, 0, 1<<62)
 	c.intParam("set-max-intset-entries", &c.SetMaxIntset, 0, 1<<62)
+	c.memParam("hll-sparse-max-bytes", &c.HLLSparseMaxBytes)
 	c.intParam("set-max-listpack-entries", &c.SetMaxEntries, 0, 1<<62)
 	c.intParam("set-max-listpack-value", &c.SetMaxValue, 0, 1<<62)
 	c.intParam("zset-max-listpack-entries", &c.ZSetMaxEntries, 0, 1<<62)

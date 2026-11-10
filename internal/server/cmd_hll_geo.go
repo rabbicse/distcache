@@ -55,6 +55,11 @@ func (c *Ctx) getHLL(key string) (*ds.HLL, bool) {
 	return h, true
 }
 
+// hllSparseMax returns hll-sparse-max-bytes, clamped to int.
+func (c *Ctx) hllSparseMax() int {
+	return int(min(c.server.cfg.HLLSparseMaxBytes.Load(), math.MaxInt32))
+}
+
 func cmdPFAdd(c *Ctx) {
 	key := c.Arg(1)
 	v, ok := c.getHLLString(key)
@@ -70,9 +75,10 @@ func cmdPFAdd(c *Ctx) {
 	} else {
 		b = slices.Clone(v)
 	}
+	sparseMax := c.hllSparseMax()
 	for _, el := range c.Args[2:] {
 		var r int
-		b, r = ds.HLLAdd(b, el)
+		b, r = ds.HLLAdd(b, el, sparseMax)
 		switch r {
 		case -1:
 			c.Err(errInvalidHLL)
@@ -165,9 +171,10 @@ func cmdPFMerge(c *Ctx) {
 		}
 		ds.HLLWriteDense(b, acc)
 	} else {
+		sparseMax := c.hllSparseMax()
 		for i, r := range acc.Reg {
 			if r != 0 {
-				b, _ = ds.HLLSet(b, i, r) // b was validated, so -1 cannot occur
+				b, _ = ds.HLLSet(b, i, r, sparseMax) // b was validated, so -1 cannot occur
 			}
 		}
 	}
