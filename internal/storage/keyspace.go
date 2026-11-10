@@ -136,7 +136,6 @@ type Shard struct {
 	// ops and lockWait are statistics updated atomically outside mu.
 	ops      atomic.Int64 // commands that locked this shard
 	lockWait atomic.Int64 // nanoseconds spent blocked acquiring mu
-	_        [64]byte     // keeps neighbouring shards' counters off this cache line
 }
 
 // lock acquires the shard lock, timing the wait only when the fast

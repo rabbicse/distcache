@@ -12,8 +12,8 @@ func TestServer_StatsSnapshot(t *testing.T) {
 	c := testutil.MustDial(t, addr)
 	c.DoS("SET", "a", "1")
 	first := srv.Stats()
-	if len(first.Shards) != 256 {
-		t.Errorf("shards: got %d, want 256", len(first.Shards))
+	if want := srv.Config().Shards; len(first.Shards) != want {
+		t.Errorf("shards: got %d, want %d", len(first.Shards), want)
 	}
 	if first.Role != "master" {
 		t.Errorf("role: got %q, want master", first.Role)

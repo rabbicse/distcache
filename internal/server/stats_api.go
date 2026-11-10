@@ -11,7 +11,11 @@ import (
 // ShardStat is one shard's statistics in a StatsSnapshot.
 type ShardStat struct {
 	Keys     int64         // keys across every database in the shard
-	Ops      int64         // keyed commands that locked the shard (LOCKALL commands excluded)
+	// Ops counts top-level keyed commands that locked the shard. Commands that
+	// lock every shard (FLUSHALL, EVAL, MULTI/EXEC...), commands queued in a
+	// transaction or run from a script, and keyspace walks such as KEYS/SCAN
+	// are not counted per shard; they still count in StatsSnapshot.Commands.
+	Ops int64
 	LockWait time.Duration // total time spent blocked acquiring the shard lock
 }
 
