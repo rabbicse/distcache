@@ -39,3 +39,5 @@ with a multi-threaded load generator. The committed baseline
 `2026-11-05-docker-linux-arm64-m1.md` was produced in a Docker Desktop VM and
 predates the per-cell flush, so its later cells ran on larger data structures.
 Compare results only from the same machine and setup.
+
+Latency percentiles use the nearest-rank rule (since commit 584c564; the 2026-11-05 baseline used int(q*n), one rank lower — negligible at ~100k samples).

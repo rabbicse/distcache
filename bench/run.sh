@@ -34,6 +34,12 @@ if [ "${BENCH_PREBUILT:-0}" != 1 ]; then
 fi
 GOVER="$(go version 2>/dev/null || echo "${BENCH_GO_VERSION:-unknown} (prebuilt binaries)")"
 
+# port_listening is a connect-only probe: it cannot hang on a listener that
+# accepts but never replies, unlike a PING.
+port_listening() { # port
+  nc -z 127.0.0.1 "$1" >/dev/null 2>&1
+}
+
 port_answers() { # port
   bin/distcache-bench -p "$1" -c 1 -n 1 -t ping -q >/dev/null 2>&1
 }
@@ -41,7 +47,7 @@ port_answers() { # port
 # require_free refuses to start when something already answers on the port,
 # otherwise the results would silently measure a foreign server.
 require_free() { # port
-  if port_answers "$1"; then
+  if port_listening "$1"; then
     echo "port $1 is already in use by another server; stop it and retry" >&2
     exit 1
   fi
@@ -54,7 +60,8 @@ wait_port() { # port pid
       echo "server for port $1 exited during startup" >&2
       return 1
     fi
-    if port_answers "$1"; then return 0; fi
+    # Our own child is listening, so the PING below cannot hang on a stranger.
+    if port_listening "$1" && port_answers "$1"; then return 0; fi
     sleep 0.1
   done
   echo "server on port $1 did not start" >&2
