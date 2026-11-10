@@ -91,11 +91,20 @@ flowchart LR
     SUBSCRIBE*, PSUBSCRIBE, SSUBSCRIBE, MONITOR, B* blocking commands with timeout 0,
     and CLIENT REPLY/QUIT/RESET.
 
+- **Interactive console extras** (added 2026-11-10):
+  - a sample-command panel per data type;
+  - a "Load sample data" seed;
+  - command autocomplete with syntax hints from COMMAND DOCS;
+  - keyboard history.
+- **Pub/Sub page** (moved from phase B, 2026-11-10):
+  - publish form;
+  - live SUBSCRIBE/PSUBSCRIBE over SSE on a dedicated internal session;
+  - active channels with subscriber counts.
+
 ### Phase B
 - ACL users and roles. A `+@all` user is admin; a user without `+@write` is viewer, which hides edit controls. The server still enforces permissions, so hiding is only cosmetic.
 - Editing: create, edit and delete keys and change TTLs. Each change needs a confirmation step, and FLUSHDB/FLUSHALL need the database name typed in.
-- Server pages: CONFIG view/set, CLIENT LIST/KILL, SLOWLOG, replication, and live
-  pub/sub and MONITOR streams over SSE.
+- Server pages: CONFIG view/set, CLIENT LIST/KILL, SLOWLOG, replication, and a live MONITOR stream over SSE.
 - Value masking for configured key patterns (`web-mask-patterns`).
 
 ## 4. Security

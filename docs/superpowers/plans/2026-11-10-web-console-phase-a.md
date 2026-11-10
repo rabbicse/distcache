@@ -117,7 +117,7 @@
   func (c *Console) Close() error
   ```
 
-- Templates are parsed once from `embed.FS`. Every page uses `layout.html`, which contains the logo, the nav (Dashboard, Keys, Console, Logout) and the insecure banner slot.
+- Templates are parsed once from `embed.FS`. Every page uses `layout.html`, which contains the logo, the nav (Dashboard, Keys, Console, Pub/Sub, Logout) and the insecure banner slot.
 
 - [ ] **Step 1: Write failing tests.**
   - `TestServer_SecurityHeaders`: GET `/static/app.css` and `/login` both carry the exact CSP from spec §4, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`. Data pages carry `Cache-Control: no-store`.
@@ -198,7 +198,7 @@
 ### Task 6: Command console
 
 **Files:**
-- Create: `internal/web/console.go`, `internal/web/render.go` (RESP → view model), `internal/web/templates/console.html`, `internal/web/templates/reply.html`
+- Create: `internal/web/console.go`, `internal/web/samples.go`, `internal/web/static/console.js`, `internal/web/render.go` (RESP → view model), `internal/web/templates/console.html`, `internal/web/templates/reply.html`
 - Test: `internal/web/console_test.go`
 
 **Interfaces:**
@@ -209,7 +209,14 @@
   - Route: POST `/console/exec` (form field `cmd`) returns the `reply.html` fragment.
   - The deny list is a `map[string]string` (command → reason) with: SUBSCRIBE, PSUBSCRIBE, SSUBSCRIBE, MONITOR, QUIT, RESET, CLIENT REPLY, plus BLPOP, BRPOP, BLMOVE, BRPOPLPUSH, BZPOPMIN, BZPOPMAX, BLMPOP, BZMPOP and XREAD/XREADGROUP with BLOCK, when the timeout is 0.
 
+- Interactivity:
+  - **Sample-command panel** (`internal/web/samples.go`): a static, curated list grouped by data type (Strings, Hashes, Lists, Sets, Sorted sets, Streams, Geo, HyperLogLog, Pub/Sub, Server). Each group has 3–6 runnable examples with a one-line description, using keys prefixed `sample:`. Clicking an example fills the input; Shift+click runs it. A "Load sample data" button runs a fixed seed script that creates one `sample:*` key of each type and refuses if any `sample:*` key already exists.
+  - **Autocomplete and hints**: GET `/console/complete?q=` returns up to 10 command names matching the prefix, plus the syntax summary from `COMMAND DOCS` (cached once per process). It renders as a datalist/hint line under the input.
+  - Keyboard: Up/Down walks history, Tab accepts a completion, Ctrl+L clears the output. This lives in `static/console.js`, which is plain JS under the CSP (no inline scripts).
 - [ ] **Step 1: Write failing tests.**
+  - `TestConsole_SamplesAreValidCommands`: every sample command parses, names a command that exists in the command table, and runs on a fresh server without an error reply after the seed script.
+  - `TestConsole_SeedRefusesWhenSamplesExist`.
+  - `TestConsole_CompletePrefix`: `q=hg` returns HGET, HGETALL and so on, with a non-empty syntax hint; `q=` returns nothing.
   - `TestConsole_ParseCommandLine`: table cases `set k "a b"` → `[set k a b]`, `'it''s'` errors, `"\x41"` → `A`, and an unbalanced quote errors.
   - `TestConsole_ExecRendersReplies`: `PING` → status PONG, `INCR n` → int, `GET missing` → nil, `HGETALL h` → map, and an error reply rendered with the `error` kind.
   - `TestConsole_DeniedCommands`: `SUBSCRIBE x`, `MONITOR` and `BLPOP k 0` get a refusal fragment naming the reason, and nothing is executed (MONITOR not registered). `BLPOP k 1` executes.
@@ -276,6 +283,35 @@
 - [ ] **Step 4: Run** `go test -race ./internal/web` — expect PASS.
 - [ ] **Step 5: Commit** `feat(web): key browser with per-type viewers`.
 
+### Task 8a: Pub/Sub page
+
+**Files:**
+- Create: `internal/web/pubsub.go`, `internal/web/templates/pubsub.html`
+- Test: `internal/web/pubsub_test.go`
+
+**Interfaces:**
+- Consumes: `server.(*Server).NewSession()`, `Session.Exec`, `Session.ReadPush` (existing, exec.go), session/CSRF from Task 5, `replyView` from Task 6.
+- Routes:
+  - GET `/pubsub` shows the page: active channels from `PUBSUB CHANNELS`, with counts from `PUBSUB NUMSUB` and `PUBSUB NUMPAT`, plus a publish form and a subscribe form.
+  - POST `/pubsub/publish` (fields `channel`, `message`) runs `PUBLISH` on the browser session and returns the receiver count.
+  - GET `/events/pubsub?ch=a,b&pat=news.*` is an SSE stream. It opens a dedicated `server.Session` for this stream (never the browser session's), SUBSCRIBEs or PSUBSCRIBEs, and forwards each push as `event: message` with a rendered row (time, channel, pattern, payload, hex if binary).
+  - At most 20 channels/patterns per stream and 4 open streams per browser session; above that the server replies 429.
+  - The stream session is closed when the browser disconnects, so the subscription disappears from `PUBSUB NUMSUB`.
+  - Payloads are truncated to 4 KiB in the UI. The view shows the last 500 messages, with pause/resume and clear done client-side.
+
+- [ ] **Step 1: Write failing tests.**
+  - `TestPubSub_PublishReturnsReceivers`.
+  - `TestPubSub_StreamReceivesMessages`: open the SSE stream for `ch=news`, PUBLISH 3 messages over RESP, and the stream yields 3 `event: message` frames in order within 2 s.
+  - `TestPubSub_PatternSubscribe`: `pat=news.*` receives `news.tech` and not `sport`.
+  - `TestPubSub_DisconnectUnsubscribes`: after the client cancels, `PUBSUB NUMSUB news` returns 0 within 1 s.
+  - `TestPubSub_Limits`: 21 channels → 400; a 5th stream → 429.
+  - `TestPubSub_HostilePayloadEscaped`.
+  - `TestPubSub_RequiresSessionAndCSRF`: publishing without CSRF → 403.
+- [ ] **Step 2: Run** the tests — expect FAIL.
+- [ ] **Step 3: Implement.** Each stream is one goroutine that reads pushes with ReadPush and exits on `r.Context().Done()`. It sends a `: keepalive` comment every 15 s.
+- [ ] **Step 4: Run** `go test -race ./internal/web` — expect PASS.
+- [ ] **Step 5: Commit** `feat(web): pub/sub page with live subscribe and publish`.
+
 ### Task 9: Wire-up, end-to-end test, docs
 
 **Files:**
@@ -290,5 +326,5 @@
 - [ ] **Step 2: Run** `cd test/e2e && go test -run WebConsole` — expect FAIL.
 - [ ] **Step 3: Implement the wire-up and write the docs.**
   - The guide covers enabling the console, each TLS mode with a sample command, reverse-proxy setup (one nginx snippet), the security model and a page tour.
-- [ ] **Step 4: Verify.** Run `go build ./... && go vet ./... && go test -race -count=1 ./... && (cd test/e2e && go test -race -count=1 ./...)` — expect all PASS. Then open each page in a browser via Playwright against a local server (login, dashboard updating, keys, one viewer per type, console) and save screenshots to the scratchpad.
+- [ ] **Step 4: Verify.** Run `go build ./... && go vet ./... && go test -race -count=1 ./... && (cd test/e2e && go test -race -count=1 ./...)` — expect all PASS. Then open each page in a browser via Playwright against a local server (login, dashboard updating, keys, one viewer per type, console with samples, pub/sub live) and save screenshots to the scratchpad.
 - [ ] **Step 5: Commit** `feat(web): start console from distcache-server; e2e test and guide`.
