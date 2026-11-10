@@ -1,8 +1,8 @@
 // Regression tests for divergences from Redis 8.4 found by the differential
-// tests (run against redis:8.4.8). Per ruling R6 the test tasks do not fix
-// them: each DistCache test is skipped as a known bug, while
+// tests (run against redis:8.4.8). Each entry was a known bug, now fixed;
+// TestRedis84Divergences keeps DistCache matching the expectations, while
 // TestRedis84Divergences_WantsMatchRedis checks every expectation against a
-// real Redis so the fix batch has verified targets.
+// real Redis.
 package server_test
 
 import (
@@ -14,7 +14,7 @@ import (
 // divergence is one known bug with the Redis 8.4 replies DistCache must give.
 type divergence struct {
 	name string // test name suffix
-	bug  string // skip message: "known bug Bnn: ..."
+	bug  string // the fixed bug: "known bug Bnn: ..."
 	// steps returns the script; it may query c (for example FUNCTION DUMP)
 	// because some payloads are server-specific.
 	steps func(t *testing.T, c *testutil.Client) []testutil.Step
@@ -105,7 +105,6 @@ func runDivergence(t *testing.T, c *testutil.Client, d divergence) {
 func TestRedis84Divergences(t *testing.T) {
 	for _, d := range redis84Divergences {
 		t.Run(d.name, func(t *testing.T) {
-			t.Skip(d.bug)
 			_, addr := testutil.StartServer(t, nil)
 			runDivergence(t, testutil.MustDial(t, addr), d)
 		})

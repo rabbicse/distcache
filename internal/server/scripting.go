@@ -597,11 +597,13 @@ func (e *scriptEngine) scriptClient(c *Ctx) *Client {
 	return sc
 }
 
-// parseNumKeys validates the numkeys argument at position 2.
-func parseNumKeys(c *Ctx) (int, bool) {
+// parseNumKeys validates the numkeys argument at position 2. notIntErr is
+// the reply for a non-integer value: EVAL uses the generic integer error,
+// FCALL its own "Bad number of keys provided".
+func parseNumKeys(c *Ctx, notIntErr string) (int, bool) {
 	n, ok := parseInt(c.Args[2])
 	if !ok {
-		c.Err(errNotInt)
+		c.Err(notIntErr)
 		return 0, false
 	}
 	if n < 0 {
@@ -673,7 +675,7 @@ func (e *scriptEngine) runScript(c *Ctx, vm *luaVM, fn lua.Value, args []lua.Val
 
 func evalGeneric(c *Ctx, bySha, readOnly bool) {
 	e := c.server.scripts
-	numkeys, ok := parseNumKeys(c)
+	numkeys, ok := parseNumKeys(c, errNotInt)
 	if !ok {
 		return
 	}
@@ -787,7 +789,7 @@ func cmdScript(c *Ctx) {
 		e.mu.Unlock()
 	case "flush":
 		if len(c.Args) > 3 || (len(c.Args) == 3 && !c.Is(2, "async") && !c.Is(2, "sync")) {
-			c.SyntaxErr()
+			c.Err("ERR SCRIPT FLUSH only support SYNC|ASYNC option")
 			return
 		}
 		e.mu.Lock()
@@ -972,7 +974,7 @@ func (e *scriptEngine) functionLoad(code string, replace bool) (string, error) {
 	defer e.mu.Unlock()
 	old := e.libs[name]
 	if old != nil && !replace {
-		return "", fmt.Errorf("ERR Library '%s' already exists", name)
+		return "", libraryExistsError(name)
 	}
 	for fn := range lib.funcs {
 		if f, ok := e.funcs[fn]; ok && f.lib != name {
@@ -1020,7 +1022,7 @@ func (e *scriptEngine) vmFunction(vm *luaVM, f *luaFunction) (lua.Value, error) 
 
 func fcallGeneric(c *Ctx, readOnly bool) {
 	e := c.server.scripts
-	numkeys, ok := parseNumKeys(c)
+	numkeys, ok := parseNumKeys(c, "ERR Bad number of keys provided")
 	if !ok {
 		return
 	}
@@ -1110,7 +1112,7 @@ func cmdFunction(c *Ctx) {
 				pattern = c.Arg(i + 1)
 				i++
 			default:
-				c.SyntaxErr()
+				c.Err("ERR Unknown argument " + c.Arg(i))
 				return
 			}
 		}
@@ -1151,7 +1153,7 @@ func cmdFunction(c *Ctx) {
 				c.W.WriteBulkString("flags")
 				c.W.WriteSetLen(len(f.flags))
 				for _, fl := range f.flags {
-					c.W.WriteBulkString(fl)
+					c.W.WriteSimple(fl)
 				}
 			}
 			if withCode {
@@ -1241,6 +1243,14 @@ func (e *scriptEngine) dumpLibraries() []byte {
 	return b.Bytes()
 }
 
+// libraryExistsError is returned by functionLoad when the library is
+// already loaded and REPLACE was not given; its value is the library name.
+type libraryExistsError string
+
+func (e libraryExistsError) Error() string {
+	return fmt.Sprintf("ERR Library '%s' already exists", string(e))
+}
+
 func (e *scriptEngine) restoreLibraries(payload []byte, policy string) error {
 	if !bytes.HasPrefix(payload, []byte("DCFN1")) {
 		return errors.New("ERR payload version or checksum are wrong")
@@ -1270,6 +1280,11 @@ func (e *scriptEngine) restoreLibraries(payload []byte, policy string) error {
 	}
 	for _, code := range codes {
 		if _, err := e.functionLoad(code, policy == "replace"); err != nil {
+			// FUNCTION RESTORE names the library without the quotes
+			// FUNCTION LOAD uses.
+			if name, ok := errors.AsType[libraryExistsError](err); ok {
+				return fmt.Errorf("ERR Library %s already exists", string(name))
+			}
 			return err
 		}
 	}
