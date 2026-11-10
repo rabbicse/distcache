@@ -534,3 +534,77 @@ func TestConfig_WebParams(t *testing.T) {
 		t.Errorf("file got port=%d bind=%q", f.WebPort, f.WebBind)
 	}
 }
+
+func TestConfig_WebParams_Edges(t *testing.T) {
+	tests := []struct {
+		name, param, value string
+		wantErr            bool
+	}{
+		{"port -1", "web-port", "-1", true},
+		{"port 65536", "web-port", "65536", true},
+		{"port 65535", "web-port", "65535", false},
+		{"port abc", "web-port", "abc", true},
+		{"timeout -1", "web-session-timeout", "-1", true},
+		{"timeout -5m", "web-session-timeout", "-5m", true},
+		{"timeout 0", "web-session-timeout", "0", true},
+		{"timeout 30s", "web-session-timeout", "30s", true},
+		{"timeout 1m", "web-session-timeout", "1m", false},
+		{"timeout 60 seconds", "web-session-timeout", "60", false},
+		{"timeout abc", "web-session-timeout", "abc", true},
+		{"timeout huge seconds", "web-session-timeout", "99999999999999", true},
+		{"timeout huge unit", "web-session-timeout", "99999999999h", true},
+		{"proxy ip", "web-trusted-proxy", "10.0.0.1, ::1", false},
+		{"proxy cidr", "web-trusted-proxy", "10.0.0.0/8", false},
+		{"proxy bad cidr", "web-trusted-proxy", "10.0.0.1/99", true},
+		{"proxy hostname", "web-trusted-proxy", "10.0.0.1,foo", true},
+		{"proxy empty", "web-trusted-proxy", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Default().Set(tc.param, tc.value, true)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Set(%s, %q) got err=%v, wantErr=%v", tc.param, tc.value, err, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("list whitespace and empties", func(t *testing.T) {
+		c := Default()
+		if err := c.Set("web-tls-hosts", " a , b ,, ", true); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"a", "b"}; !slices.Equal(c.WebTLSHosts, want) {
+			t.Errorf("got %v, want %v", c.WebTLSHosts, want)
+		}
+		if err := c.Set("web-tls-hosts", "", true); err != nil || len(c.WebTLSHosts) != 0 {
+			t.Errorf("empty got err=%v hosts=%v", err, c.WebTLSHosts)
+		}
+	})
+}
+
+func TestConfig_WebParams_RewriteRoundTrip(t *testing.T) {
+	path := writeFile(t, t.TempDir(), "distcache.conf", "")
+	c := Default()
+	if err := c.LoadFile(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range [][2]string{
+		{"web-port", "7380"}, {"web-bind", "0.0.0.0"}, {"web-tls", "on"}, {"web-tls-cert", "/p a/c.pem"},
+		{"web-tls-key", "/p a/k.pem"}, {"web-tls-hosts", "a.example,b.example"},
+		{"web-trusted-proxy", "10.0.0.1,10.1.0.0/16"}, {"web-insecure", "yes"}, {"web-session-timeout", "45m"},
+	} {
+		if err := c.Set(s[0], s[1], true); err != nil {
+			t.Fatalf("Set(%s): %v", s[0], err)
+		}
+	}
+	if err := c.Rewrite(); err != nil {
+		t.Fatal(err)
+	}
+	fresh := Default()
+	if err := fresh.LoadFile(path); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got, want := fresh.Get("web-*"), c.Get("web-*"); !reflect.DeepEqual(got, want) || len(want) != 9 {
+		t.Errorf("round trip got %v, want %v", got, want)
+	}
+}

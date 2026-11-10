@@ -7,6 +7,8 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math"
+	"net"
 	"os"
 	"sort"
 	"strconv"
@@ -777,8 +779,8 @@ func (c *Config) registerWebParams() {
 		})
 	c.strParam("web-tls-cert", false, &c.WebTLSCert)
 	c.strParam("web-tls-key", false, &c.WebTLSKey)
-	c.listParam("web-tls-hosts", &c.WebTLSHosts)
-	c.listParam("web-trusted-proxy", &c.WebTrustedProxy)
+	c.listParam("web-tls-hosts", &c.WebTLSHosts, nil)
+	c.listParam("web-trusted-proxy", &c.WebTrustedProxy, validIPOrCIDR)
 	c.add("web-insecure", false, func(c *Config) string { return yesno(c.WebInsecure) },
 		func(c *Config, v string) error {
 			b, err := parseYesNo(v)
@@ -794,18 +796,27 @@ func (c *Config) registerWebParams() {
 			if err != nil {
 				return err
 			}
+			if d < minWebSessionTimeout {
+				return errors.New("argument must be at least 1m")
+			}
 			c.WebSessionTimeout = d
 			return nil
 		})
 }
 
-// listParam registers a static comma-separated list parameter.
-func (c *Config) listParam(name string, p *[]string) {
+// listParam registers a static comma-separated list parameter. A repeated
+// directive replaces the list. When check is non-nil every entry must pass it.
+func (c *Config) listParam(name string, p *[]string, check func(string) error) {
 	c.add(name, false, func(c *Config) string { return strings.Join(*p, ",") },
 		func(c *Config, v string) error {
 			var out []string
 			for _, f := range strings.Split(v, ",") {
 				if f = strings.TrimSpace(f); f != "" {
+					if check != nil {
+						if err := check(f); err != nil {
+							return err
+						}
+					}
 					out = append(out, f)
 				}
 			}
@@ -814,11 +825,26 @@ func (c *Config) listParam(name string, p *[]string) {
 		})
 }
 
+// validIPOrCIDR accepts an IP address or a CIDR block.
+func validIPOrCIDR(v string) error {
+	if net.ParseIP(v) != nil {
+		return nil
+	}
+	if _, _, err := net.ParseCIDR(v); err == nil {
+		return nil
+	}
+	return fmt.Errorf("invalid IP or CIDR %q", v)
+}
+
+// minWebSessionTimeout is the shortest accepted web-session-timeout; shorter
+// values would expire sessions before a user could act.
+const minWebSessionTimeout = time.Minute
+
 // parseDuration accepts Go duration syntax ("30m") or plain seconds ("1800").
 func parseDuration(v string) (time.Duration, error) {
 	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-		if n < 0 {
-			return 0, errors.New("argument must be a non-negative duration")
+		if n < 0 || n > int64(math.MaxInt64/time.Second) {
+			return 0, errors.New("argument is out of range for a duration")
 		}
 		return time.Duration(n) * time.Second, nil
 	}
