@@ -25,7 +25,7 @@ import (
 // command set and replies DistCache implements (reported to clients).
 const (
 	Version      = "1.0.0"
-	RedisVersion = "7.4.0"
+	RedisVersion = "8.4.0"
 )
 
 type stats struct {

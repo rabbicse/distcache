@@ -244,3 +244,28 @@ func TestServerCmdCommands_ACLUnknownSubcommand(t *testing.T) {
 		testutil.S("-ERR unknown subcommand 'FOO'. Try ACL HELP.", "ACL", "FOO"),
 	})
 }
+
+// TestServerCmdCommands_ReportsRedisVersion checks every place a client can
+// read the emulated Redis version reports 8.4 (B41).
+func TestServerCmdCommands_ReportsRedisVersion(t *testing.T) {
+	_, addr := testutil.StartServer(t, nil)
+	c := testutil.MustDial(t, addr)
+	v, err := c.Do("INFO", "server")
+	if err != nil {
+		t.Fatalf("INFO server: %v", err)
+	}
+	info := string(v.Str)
+	if !strings.Contains(info, "\r\nredis_version:8.4.0\r\n") {
+		t.Errorf("INFO server: got %q, want redis_version:8.4.0", info)
+	}
+	if !strings.Contains(info, "\r\ndistcache_version:") {
+		t.Errorf("INFO server: got %q, want a distcache_version field", info)
+	}
+	if got, want := c.DoS("HELLO", "2"), `"version", "8.4.0"`; !strings.Contains(got, want) {
+		t.Errorf("HELLO 2: got %s, want it to contain %s", got, want)
+	}
+	testutil.RunScript(t, c, []testutil.Step{
+		testutil.S(`"8.4.0"`, "EVAL", "return redis.REDIS_VERSION", "0"),
+		testutil.S(":525312", "EVAL", "return redis.REDIS_VERSION_NUM", "0"),
+	})
+}

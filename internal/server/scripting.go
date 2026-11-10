@@ -181,7 +181,7 @@ func (e *scriptEngine) newVM() *luaVM {
 		r.RawSet(k, v)
 	}
 	r.RawSet("REDIS_VERSION", RedisVersion)
-	r.RawSet("REDIS_VERSION_NUM", float64(0x070400))
+	r.RawSet("REDIS_VERSION_NUM", float64(0x080400))
 	L.Globals.RawSet("redis", r)
 	L.Globals.RawSet("server", r)
 	for _, lib := range []string{"string", "table", "math", "bit", "cjson", "cmsgpack", "redis"} {
