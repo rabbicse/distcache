@@ -56,10 +56,14 @@ type Console struct {
 	mux  *http.ServeMux // routes; handler wraps it with the middleware chain
 	h    http.Handler
 
-	// mu guards ln and hs, which Start and Close set and Addr reads.
-	mu sync.Mutex
-	ln net.Listener
-	hs *http.Server
+	// newTicker creates the insecure-warning ticker; tests inject their own.
+	newTicker func(time.Duration) (<-chan time.Time, func())
+
+	// mu guards ln, hs and stopWarn, which Start and Close set and Addr reads.
+	mu       sync.Mutex
+	ln       net.Listener
+	hs       *http.Server
+	stopWarn chan struct{} // closed by Close to end the warning goroutine
 }
 
 // page is the data passed to layout.html for every page.
@@ -88,7 +92,7 @@ func New(o Options) (*Console, error) {
 	if err != nil {
 		return nil, fmt.Errorf("embed static: %w", err)
 	}
-	c := &Console{srv: o.Server, cfg: o.Config, log: log, tmpl: tmpl, mux: http.NewServeMux()}
+	c := &Console{srv: o.Server, cfg: o.Config, log: log, tmpl: tmpl, mux: http.NewServeMux(), newTicker: defaultTicker}
 
 	c.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(static)))
 	c.mux.HandleFunc("GET /{$}", c.pageHandler("Dashboard", "dashboard"))
@@ -112,9 +116,16 @@ func New(o Options) (*Console, error) {
 func (c *Console) Handler() http.Handler { return c.h }
 
 // resolveTLS returns the TLS configuration for the listener, or nil for plain
-// HTTP. Task 4 implements certificate loading and self-signed generation; until
-// then the console always serves plain HTTP.
-func (c *Console) resolveTLS() (*tls.Config, error) { return nil, nil }
+// HTTP, by delegating to the package-level resolveTLS with the data directory.
+func (c *Console) resolveTLS() (*tls.Config, error) {
+	return resolveTLS(c.cfg, c.cfg.Dir, c.log)
+}
+
+// defaultTicker is the production ticker for the insecure warning.
+func defaultTicker(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(d)
+	return t.C, t.Stop
+}
 
 // Start binds WebBind:WebPort and serves in the background. It returns once
 // the socket is bound. Callers skip Start when WebPort is 0 (console disabled).
@@ -140,6 +151,15 @@ func (c *Console) Start() error {
 	}
 	c.mu.Lock()
 	c.ln, c.hs = ln, hs
+	if insecureEffective(c.cfg) {
+		c.stopWarn = make(chan struct{})
+		ticks, stop := c.newTicker(insecureWarnEvery)
+		// Owned by Close, which closes stopWarn; the ticker stops with it.
+		go func(done chan struct{}) {
+			defer stop()
+			warnInsecure(c.log, ticks, done)
+		}(c.stopWarn)
+	}
 	c.mu.Unlock()
 
 	// The goroutine ends when Close shuts hs down.
@@ -171,6 +191,10 @@ func (c *Console) Addr() string {
 func (c *Console) Close() error {
 	c.mu.Lock()
 	hs, ln := c.hs, c.ln
+	if c.stopWarn != nil {
+		close(c.stopWarn)
+		c.stopWarn = nil
+	}
 	c.mu.Unlock()
 	if hs == nil {
 		return nil
@@ -193,9 +217,9 @@ func (c *Console) pageHandler(title, active string) http.HandlerFunc {
 	}
 }
 
-// insecure reports whether the banner slot should show: plain HTTP beyond
-// loopback. Task 4 refines this once TLS state is known.
-func (c *Console) insecure() bool { return c.cfg.WebInsecure }
+// insecure reports whether the banner slot should show: web-insecure with
+// plain HTTP beyond loopback.
+func (c *Console) insecure() bool { return insecureEffective(c.cfg) }
 
 func (c *Console) notFound(w http.ResponseWriter, r *http.Request) {
 	c.renderError(w, http.StatusNotFound, "Page not found")

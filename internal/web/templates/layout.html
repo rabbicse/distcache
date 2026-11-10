@@ -21,7 +21,7 @@
     <a href="/logout"{{if eq .Active "logout"}} aria-current="page"{{end}}>Logout</a>
   </nav>
 </header>
-{{if .Insecure}}<div class="banner" role="alert" id="insecure-banner">Insecure connection: this console is served over plain HTTP.</div>{{end}}
+{{if .Insecure}}<div class="insecure-banner" role="alert" id="insecure-banner">Insecure connection: this console is served over plain HTTP.</div>{{end}}
 <main>
 {{if eq .Active "login"}}
   <h1>Sign in</h1>
