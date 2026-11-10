@@ -86,6 +86,13 @@ type Console struct {
 	hs       *http.Server
 	stopWarn chan struct{} // closed by Close to end the warning goroutine
 	stopJan  chan struct{} // closed by Close to end the janitor
+
+	// sampler and stopSampler are set once by New (when a server is attached)
+	// and never reassigned; stopSampler is guarded by mu and cleared by Close.
+	sampler     *sampler
+	stopSampler func()
+	// sampleTick supplies the sampling ticks; tests inject their own.
+	sampleTick func() (<-chan time.Time, func())
 }
 
 // page is the data passed to layout.html for every page.
@@ -99,6 +106,8 @@ type page struct {
 	HXHeaders string        // hx-headers JSON carrying CSRF
 	Samples   []sampleGroup // console sample panel
 	History   []string      // console history, newest first
+	Tiles     tilesView     // dashboard tiles
+	Memory    *memoryView   // dashboard memory control
 }
 
 // New builds the console handler and parses templates. It does not listen.
@@ -130,12 +139,15 @@ func New(o Options) (*Console, error) {
 		srv: o.Server, cfg: o.Config, log: log, tmpl: tmpl, mux: http.NewServeMux(),
 		now: time.Now, trusted: trusted,
 		sessions: make(map[string]*session), lockouts: make(map[netip.Prefix]*lockout),
-		newTicker: defaultTicker,
+		newTicker:  defaultTicker,
+		sampleTick: func() (<-chan time.Time, func()) { return defaultTicker(sampleEvery) },
 	}
 
 	c.checkPass = c.checkPassword
 	c.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(static)))
-	c.mux.HandleFunc("GET /{$}", c.pageHandler("Dashboard", "dashboard"))
+	c.mux.HandleFunc("GET /{$}", c.handleDashboard)
+	c.mux.HandleFunc("GET /events/stats", c.handleStatsStream)
+	c.mux.HandleFunc("POST /settings/memory", c.handleMemory)
 	c.mux.HandleFunc("GET /keys", c.pageHandler("Keys", "keys"))
 	c.mux.HandleFunc("GET /console", c.handleConsolePage)
 	c.mux.HandleFunc("POST /console/exec", c.handleExec)
@@ -153,6 +165,9 @@ func New(o Options) (*Console, error) {
 	h = securityHeaders(h)
 	h = recoverer(log, c.renderError, h)
 	c.h = h
+	// The sampler goroutine is owned by Close. Tests that build a Console
+	// without closing it leak one idle goroutine, which is harmless.
+	c.startSampler()
 	return c, nil
 }
 
@@ -245,7 +260,12 @@ func (c *Console) Close() error {
 		close(c.stopJan)
 		c.stopJan = nil
 	}
+	stopSampler := c.stopSampler
+	c.stopSampler = nil
 	c.mu.Unlock()
+	if stopSampler != nil {
+		stopSampler()
+	}
 	defer c.closeAllSessions()
 	if hs == nil {
 		return nil

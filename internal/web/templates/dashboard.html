@@ -1,0 +1,15 @@
+{{define "dashboard"}}<div class="dashboard">
+  <div id="live" hx-ext="sse" sse-connect="/events/stats" sse-swap="tiles">{{template "tiles" .Tiles}}</div>
+  {{with .Memory}}{{template "memory" .}}{{end}}
+</div>{{end}}
+
+{{define "memory"}}<section id="memory-control" class="memory-control">
+  <h2>Memory limit</h2>
+  <form hx-post="/settings/memory" hx-target="#memory-control" hx-swap="outerHTML">
+    <label>maxmemory <input class="mono" type="text" name="maxmemory" value="{{.MaxMemory}}" maxlength="32" spellcheck="false" autocomplete="off" required></label>
+    <label>policy <select name="policy">{{$cur := .Policy}}{{range .Policies}}<option value="{{.}}"{{if eq . $cur}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+    <button type="submit">Apply</button>
+  </form>
+  <p class="muted">A size such as 512mb or 4gb; 0 means unlimited.</p>
+  {{if .Error}}<p class="form-error" role="alert">{{.Error}}</p>{{else if .OK}}<p class="form-ok" role="status">Saved.</p>{{end}}
+</section>{{end}}

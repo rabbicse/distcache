@@ -80,3 +80,27 @@ ol.reply { padding-left: 2rem; }
 .console-samples button.sample { text-align: left; padding: 4px 8px; background: var(--surface); color: var(--text); border: 1px solid var(--border); font-weight: 400; overflow-wrap: anywhere; }
 .console-samples .seed { width: 100%; margin-bottom: 12px; }
 .multi-open { margin-top: 4px; color: #fcd34d; font-size: 0.85rem; }
+
+/* Dashboard */
+.dashboard { display: grid; gap: 20px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 12px; }
+.tile { padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.tile h2, .heat h2, .memory-control h2 { margin: 0 0 6px; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.tile p { margin: 0; }
+.tile .big { font-size: 1.6rem; line-height: 1.2; }
+.meter { display: block; width: 100%; height: 6px; margin-top: 8px; }
+.meter-bg { fill: var(--border); }
+.meter-fill { fill: var(--accent-a); }
+.sparks { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 12px; margin-top: 12px; }
+.spark { margin: 0; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.spark figcaption { display: flex; justify-content: space-between; font-size: 0.85rem; }
+.spark svg { display: block; width: 100%; height: 36px; margin-top: 6px; }
+.spark-line { fill: none; stroke: var(--accent-a); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.heat { margin-top: 12px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.heat h2 .muted { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 8px; }
+.heat svg { display: block; width: 100%; max-width: 32rem; height: auto; }
+.memory-control { padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; max-width: 36rem; }
+.memory-control form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+.memory-control select { padding: 8px 10px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+.form-ok { color: #6ee7b7; }
+select:focus-visible { outline: 2px solid var(--accent-a); outline-offset: 2px; }

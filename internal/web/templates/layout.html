@@ -26,7 +26,7 @@
 {{if .Insecure}}<div class="insecure-banner" role="alert" id="insecure-banner">Insecure connection: this console is served over plain HTTP.</div>{{end}}
 <main>
   <h1>{{.Title}}</h1>
-  {{if eq .Active "console"}}{{template "console" .}}{{else}}<p class="muted">This page is coming soon.</p>{{end}}
+  {{if eq .Active "console"}}{{template "console" .}}{{else if eq .Active "dashboard"}}{{template "dashboard" .}}{{else}}<p class="muted">This page is coming soon.</p>{{end}}
 </main>
 </body>
 </html>
