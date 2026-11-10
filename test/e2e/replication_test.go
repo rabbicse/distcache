@@ -93,3 +93,45 @@ func TestChainedReplica(t *testing.T) {
 	}
 	waitValue(t, cc, "chain", "ok")
 }
+
+// TestReplicaPFCountStaysLocal checks that PFCOUNT on a replica caches the
+// cardinality in its own copy of the HLL, as Redis does, without advancing
+// the replica's replication offset or sending anything to a sub-replica.
+// Redis's replicationFeedSlaves returns early on a replica.
+func TestReplicaPFCountStaysLocal(t *testing.T) {
+	ctx := context.Background()
+	m, mc := startNode(t, t.TempDir(), nil)
+	r, rc := startNode(t, t.TempDir(), nil)
+	_, sc := startNode(t, t.TempDir(), nil)
+	replicate(t, rc, m.Addr())
+	replicate(t, sc, r.Addr())
+	if err := mc.PFAdd(ctx, "h", "a", "b", "c").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mc.Set(ctx, "sync1", "1", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	waitValue(t, sc, "sync1", "1")
+	waitFor(t, 2*time.Second, "replica offset caught up", func() bool {
+		return infoField(t, rc, "replication", "master_repl_offset") == infoField(t, mc, "replication", "master_repl_offset")
+	})
+	before := infoField(t, rc, "replication", "master_repl_offset")
+
+	if n, err := rc.PFCount(ctx, "h").Result(); err != nil || n != 3 {
+		t.Fatalf("PFCOUNT on replica: got %d, %v, want 3", n, err)
+	}
+	if got := infoField(t, rc, "replication", "master_repl_offset"); got != before {
+		t.Fatalf("replica master_repl_offset after PFCOUNT: got %s, want %s", got, before)
+	}
+	if b := []byte(rc.Get(ctx, "h").Val()); b[15]&0x80 != 0 {
+		t.Fatalf("replica HLL header byte 15: got %#x, want the cache marked valid", b[15])
+	}
+	// A later master write orders after anything PFCOUNT could have sent.
+	if err := mc.Set(ctx, "sync2", "1", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	waitValue(t, sc, "sync2", "1")
+	if b := []byte(sc.Get(ctx, "h").Val()); b[15]&0x80 == 0 {
+		t.Fatalf("sub-replica HLL header byte 15: got %#x, want the cache still invalid", b[15])
+	}
+}

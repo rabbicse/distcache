@@ -137,11 +137,14 @@ func cmdPFCount(c *Ctx) {
 
 // cacheHLLCount stores the cardinality n just computed for the HLL v at key
 // in its header, as pfcountCommand does, so GET after PFCOUNT returns the
-// same bytes as Redis; like Redis it counts as a change and propagates the
-// PFCOUNT. It needs write locks on key, which the top-level PFCOUNT
-// (FlagExclusive) and EXEC take. Inside a script the cache is left invalid:
-// script commands run with writeLocked false even though EVAL/FCALL now hold
-// write locks, so this stays conservative.
+// same bytes as Redis. On a master it counts as a change and propagates the
+// PFCOUNT, like Redis. On a replica (other than for the master link) the
+// header is still updated but nothing is marked dirty: Redis's
+// replicationFeedSlaves returns early there, and propagating would advance
+// the replica's offset past its master's and feed sub-replicas a command the
+// master never sent. Writing needs write locks on key; the top-level PFCOUNT
+// (FlagExclusive) and EXEC take them. Commands run from a script have
+// writeLocked false, so a scripted PFCOUNT leaves the cache invalid.
 func (c *Ctx) cacheHLLCount(key string, v []byte, n uint64) {
 	if !c.writeLocked {
 		return
@@ -151,6 +154,9 @@ func (c *Ctx) cacheHLLCount(key string, v []byte, n uint64) {
 	b := slices.Clone(v)
 	ds.HLLSetCachedCount(b, n)
 	c.DB.SetValue(key, b, true)
+	if c.server.replication.isReplica() && !c.isMaster {
+		return
+	}
 	c.Dirty(1)
 }
 
