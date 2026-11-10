@@ -63,10 +63,10 @@ type stats struct {
 
 // Server is a DistCache instance.
 type Server struct {
-	cfg  *config.Config
-	ks   *storage.Keyspace
-	log  *slog.Logger
-	cmds map[string]*Command
+	cfg      *config.Config
+	keyspace *storage.Keyspace
+	log      *slog.Logger
+	commands map[string]*Command
 
 	lnMu      sync.Mutex
 	listeners []net.Listener
@@ -75,28 +75,28 @@ type Server struct {
 	clients   map[int64]*Client
 	nextID    atomic.Int64
 
-	stats   stats
-	pubsub  *pubsubHub
-	blocker *blocker
-	watches *watchRegistry
-	prop    *propagator
-	repl    *replication
-	scripts *scriptEngine
-	slowlog *slowlog
+	stats       stats
+	pubsub      *pubsubHub
+	blocker     *blocker
+	watches     *watchRegistry
+	propagator  *propagator
+	replication *replication
+	scripts     *scriptEngine
+	slowlog     *slowlog
 
 	monitorsMu sync.RWMutex
 	monitors   map[*Client]struct{}
 	monitorN   atomic.Int32
 
-	runID     string
-	startTime time.Time
-	loading   atomic.Bool
-	bgsave    atomic.Bool
-	aofRewr   atomic.Bool
-	closing   atomic.Bool
-	pauseMu   sync.RWMutex
-	pauseEnd  atomic.Int64
-	pauseAll  atomic.Bool
+	runID        string
+	startTime    time.Time
+	loading      atomic.Bool
+	bgsave       atomic.Bool
+	aofRewriting atomic.Bool
+	closing      atomic.Bool
+	pauseMu      sync.RWMutex
+	pauseEnd     atomic.Int64
+	pauseAll     atomic.Bool
 
 	done     chan struct{}
 	doneOnce sync.Once
@@ -117,7 +117,7 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 	_, _ = rand.Read(id[:])
 	s := &Server{
 		cfg:       cfg,
-		ks:        ks,
+		keyspace:  ks,
 		log:       log,
 		clients:   make(map[int64]*Client),
 		monitors:  make(map[*Client]struct{}),
@@ -133,8 +133,8 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 	s.blocker = newBlocker()
 	s.watches = newWatchRegistry()
 	s.slowlog = newSlowlog()
-	s.prop = newPropagator(s)
-	s.repl = newReplication(s)
+	s.propagator = newPropagator(s)
+	s.replication = newReplication(s)
 	s.scripts = newScriptEngine(s)
 	s.registerCommands()
 	return s
@@ -144,16 +144,16 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 // stream IDs. Call it before Start; it delegates to the keyspace so there is
 // a single source of truth. Wall-clock observability (client ages, slowlog,
 // uptime, latency) keeps using real time.
-func (s *Server) SetClock(now func() time.Time) { s.ks.SetClock(now) }
+func (s *Server) SetClock(now func() time.Time) { s.keyspace.SetClock(now) }
 
 // Now returns the current data-path time (see SetClock).
-func (s *Server) Now() time.Time { return s.ks.Now() }
+func (s *Server) Now() time.Time { return s.keyspace.Now() }
 
 // Config returns the live configuration.
 func (s *Server) Config() *config.Config { return s.cfg }
 
 // Keyspace exposes the dataset (tests, embedding).
-func (s *Server) Keyspace() *storage.Keyspace { return s.ks }
+func (s *Server) Keyspace() *storage.Keyspace { return s.keyspace }
 
 // Addr returns the first listening address once Start has bound it.
 func (s *Server) Addr() string {
@@ -172,7 +172,7 @@ func (s *Server) Start() error {
 		return err
 	}
 	if s.cfg.AppendOnly.Load() {
-		if err := s.prop.openAOF(); err != nil {
+		if err := s.propagator.openAOF(); err != nil {
 			return fmt.Errorf("open AOF: %w", err)
 		}
 	}
@@ -214,13 +214,13 @@ func (s *Server) Start() error {
 		_ = os.WriteFile(s.cfg.PidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644)
 	}
 	s.log.Info("DistCache ready to accept connections", "version", Version, "addr", s.Addr(),
-		"shards", s.ks.NumShards(), "databases", s.ks.NumDB)
+		"shards", s.keyspace.NumShards(), "databases", s.keyspace.NumDB)
 	s.wg.Add(1)
 	go s.cron()
 	if ro := s.cfg.ReplicaOf; ro != "" {
 		var host, port string
 		if _, err := fmt.Sscan(ro, &host, &port); err == nil {
-			s.repl.startReplica(host, port)
+			s.replication.startReplica(host, port)
 		}
 	}
 	close(s.ready)
@@ -286,14 +286,14 @@ func (s *Server) Shutdown(save bool) error {
 			_ = ln.Close() // best-effort: cleanup after failure or teardown
 		}
 		s.lnMu.Unlock()
-		s.repl.stop()
+		s.replication.stop()
 		if save {
 			if e := s.saveSync(); e != nil {
 				err = e
 				s.log.Warn("error saving on shutdown", "err", e)
 			}
 		}
-		s.prop.closeAOF()
+		s.propagator.closeAOF()
 		close(s.done)
 		s.clientsMu.RLock()
 		for _, c := range s.clients {
@@ -328,10 +328,10 @@ func (s *Server) cron() {
 		}
 		loops++
 		now := time.Now()
-		s.ks.Clock.Store(uint32(s.Now().Unix()))
-		s.ks.LFULogFactor.Store(s.cfg.LFULogFactor.Load())
-		s.ks.LFUDecayTime.Store(s.cfg.LFUDecayTime.Load())
-		if s.cfg.ActiveExpire.Load() && !s.repl.isReplica() && !s.loading.Load() {
+		s.keyspace.Clock.Store(uint32(s.Now().Unix()))
+		s.keyspace.LFULogFactor.Store(s.cfg.LFULogFactor.Load())
+		s.keyspace.LFUDecayTime.Store(s.cfg.LFUDecayTime.Load())
+		if s.cfg.ActiveExpire.Load() && !s.replication.isReplica() && !s.loading.Load() {
 			shardCursor = s.activeExpireCycle(shardCursor)
 		}
 		curHz := s.cfg.Hz.Load()
@@ -349,9 +349,9 @@ func (s *Server) cron() {
 		}
 		if loops%hz == 0 { // ~1s
 			s.checkSaveRules(now)
-			s.repl.cron()
-			s.prop.cron()
-			if s.cfg.MaxMemory.Load() > 0 && !s.repl.isReplica() {
+			s.replication.cron()
+			s.propagator.cron()
+			if s.cfg.MaxMemory.Load() > 0 && !s.replication.isReplica() {
 				s.performEvictions()
 			}
 		}
@@ -395,7 +395,7 @@ func (s *Server) checkClientTimeouts(now time.Time) {
 }
 
 func (s *Server) checkSaveRules(now time.Time) {
-	if s.bgsave.Load() || s.aofRewr.Load() {
+	if s.bgsave.Load() || s.aofRewriting.Load() {
 		return
 	}
 	dirty := s.stats.dirtySinceSave.Load()

@@ -119,14 +119,14 @@ func parseFlags(s string) Flag {
 
 // Ctx carries everything a handler needs.
 type Ctx struct {
-	s    *Server
-	cl   *Client
-	Cmd  *Command
-	Args [][]byte
-	W    *resp.Writer
-	DB   *storage.DB
+	server *Server
+	client *Client
+	Cmd    *Command
+	Args   [][]byte
+	W      *resp.Writer
+	DB     *storage.DB
 
-	unit  *execUnit
+	unit  *executionUnit
 	dirty int64
 	// prop replaces the propagated commands when set.
 	prop     [][][]byte
@@ -158,13 +158,13 @@ func (c *Ctx) NowTime() time.Time { return time.UnixMilli(c.DB.Now) }
 
 // execUnit groups propagation for one atomic execution (command, EXEC,
 // script) so it is written to AOF/replicas as a single block.
-type execUnit struct {
-	db     int
-	cmds   []propCmd
-	writes int
+type executionUnit struct {
+	db       int
+	commands []propagatedCommand
+	writes   int
 }
 
-type propCmd struct {
+type propagatedCommand struct {
 	db   int
 	args [][]byte
 }
@@ -354,9 +354,9 @@ func (c *Ctx) Lookup(key string) *storage.Entry {
 	e := c.DB.Lookup(key)
 	if c.Cmd.Has(FlagReadonly) && !c.inScript {
 		if e == nil {
-			c.s.stats.keyspaceMisses.Add(1)
+			c.server.stats.keyspaceMisses.Add(1)
 		} else {
-			c.s.stats.keyspaceHits.Add(1)
+			c.server.stats.keyspaceHits.Add(1)
 		}
 	}
 	return e

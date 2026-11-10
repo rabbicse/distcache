@@ -157,7 +157,7 @@ func (e *scriptEngine) newVM() *luaVM {
 			L.RuntimeError("Please specify at least one argument for this redis lib call")
 		}
 		name, _ := lua.ToStringCoerce(a[0])
-		if e.s.cmds[strings.ToLower(name)] == nil {
+		if e.s.commands[strings.ToLower(name)] == nil {
 			L.RuntimeError("Invalid command passed to redis.acl_check_cmd()")
 		}
 		return one(true)
@@ -522,10 +522,10 @@ func (e *scriptEngine) redisCall(vm *luaVM, a []lua.Value, raise bool) lua.Value
 		if vm.readOnly {
 			return fail("ERR Write commands are not allowed from read-only scripts.")
 		}
-		if s.repl.isReplica() && s.cfg.ReplicaReadOnly.Load() && !vm.sc.isMaster {
+		if s.replication.isReplica() && s.cfg.ReplicaReadOnly.Load() && !vm.sc.isMaster {
 			return fail(errReadonly)
 		}
-		if cmd.Has(FlagDenyOOM) && s.cfg.MaxMemory.Load() > 0 && s.ks.UsedMemory() > s.cfg.MaxMemory.Load() &&
+		if cmd.Has(FlagDenyOOM) && s.cfg.MaxMemory.Load() > 0 && s.keyspace.UsedMemory() > s.cfg.MaxMemory.Load() &&
 			!vm.run.wrote.Load() && s.cfg.MaxMemoryPolicy.Load() == 0 {
 			return fail(errOOM)
 		}
@@ -581,12 +581,12 @@ func (e *scriptEngine) endRun(run *scriptRun) {
 
 func (e *scriptEngine) scriptClient(c *Ctx) *Client {
 	sc := &Client{s: e.s, proto: 2, authed: true, user: "default", unblockCh: make(chan int, 1)}
-	if c.cl != nil {
-		sc.db = c.cl.db
-		sc.id = c.cl.id
-		sc.isMaster = c.cl.isMaster
-		sc.addr = c.cl.addr
-		sc.noTouch = c.cl.noTouch
+	if c.client != nil {
+		sc.db = c.client.db
+		sc.id = c.client.id
+		sc.isMaster = c.client.isMaster
+		sc.addr = c.client.addr
+		sc.noTouch = c.client.noTouch
 	}
 	sc.name.Store("")
 	sc.libName.Store("")
@@ -622,8 +622,8 @@ func argTable(args [][]byte) *lua.Table {
 }
 
 func (c *Ctx) scriptSelect(n int) {
-	if c.cl != nil {
-		c.cl.db = n
+	if c.client != nil {
+		c.client.db = n
 	}
 }
 
@@ -670,7 +670,7 @@ func (e *scriptEngine) runScript(c *Ctx, vm *luaVM, fn lua.Value, args []lua.Val
 }
 
 func evalGeneric(c *Ctx, bySha, readOnly bool) {
-	e := c.s.scripts
+	e := c.server.scripts
 	numkeys, ok := parseNumKeys(c)
 	if !ok {
 		return
@@ -748,7 +748,7 @@ func (e *scriptEngine) kill(isFunction bool) string {
 }
 
 func cmdScript(c *Ctx) {
-	e := c.s.scripts
+	e := c.server.scripts
 	switch strings.ToLower(c.Arg(1)) {
 	case "load":
 		if len(c.Args) != 3 {
@@ -1017,7 +1017,7 @@ func (e *scriptEngine) vmFunction(vm *luaVM, f *luaFunction) (lua.Value, error) 
 }
 
 func fcallGeneric(c *Ctx, readOnly bool) {
-	e := c.s.scripts
+	e := c.server.scripts
 	numkeys, ok := parseNumKeys(c)
 	if !ok {
 		return
@@ -1049,7 +1049,7 @@ func cmdFCall(c *Ctx)   { fcallGeneric(c, false) }
 func cmdFCallRO(c *Ctx) { fcallGeneric(c, true) }
 
 func cmdFunction(c *Ctx) {
-	e := c.s.scripts
+	e := c.server.scripts
 	switch strings.ToLower(c.Arg(1)) {
 	case "load":
 		replace := false
@@ -1066,8 +1066,8 @@ func cmdFunction(c *Ctx) {
 			c.Err(err.Error())
 			return
 		}
-		c.s.prop.propagate([]propCmd{{db: c.DB.Idx, args: c.Args}}, false)
-		c.s.stats.dirtySinceSave.Add(1)
+		c.server.propagator.propagate([]propagatedCommand{{db: c.DB.Idx, args: c.Args}}, false)
+		c.server.stats.dirtySinceSave.Add(1)
 		c.W.WriteBulkString(name)
 	case "delete":
 		if len(c.Args) != 3 {
@@ -1087,7 +1087,7 @@ func cmdFunction(c *Ctx) {
 		delete(e.libs, lib.name)
 		e.libVer.Add(1)
 		e.mu.Unlock()
-		c.s.prop.propagate([]propCmd{{db: c.DB.Idx, args: c.Args}}, false)
+		c.server.propagator.propagate([]propagatedCommand{{db: c.DB.Idx, args: c.Args}}, false)
 		c.W.WriteOK()
 	case "flush":
 		e.mu.Lock()
@@ -1095,7 +1095,7 @@ func cmdFunction(c *Ctx) {
 		e.funcs = map[string]*luaFunction{}
 		e.libVer.Add(1)
 		e.mu.Unlock()
-		c.s.prop.propagate([]propCmd{{db: c.DB.Idx, args: c.Args}}, false)
+		c.server.propagator.propagate([]propagatedCommand{{db: c.DB.Idx, args: c.Args}}, false)
 		c.W.WriteOK()
 	case "list":
 		pattern := ""
@@ -1191,7 +1191,7 @@ func cmdFunction(c *Ctx) {
 			c.Err(err.Error())
 			return
 		}
-		c.s.prop.propagate([]propCmd{{db: c.DB.Idx, args: c.Args}}, false)
+		c.server.propagator.propagate([]propagatedCommand{{db: c.DB.Idx, args: c.Args}}, false)
 		c.W.WriteOK()
 	case "kill":
 		if msg := e.kill(true); msg != "" {

@@ -22,25 +22,25 @@ func (s *Server) activeExpireCycle(cursor int) int {
 	hz := s.cfg.Hz.Load()
 	budget := time.Second / time.Duration(hz) / 4
 	start := time.Now()
-	n := s.ks.NumShards()
+	n := s.keyspace.NumShards()
 	visited := 0
 	hook := func(db int, key string) { s.onKeyExpired(db, key) }
 	for visited < n && time.Since(start) < budget {
 		i := cursor % n
 		cursor++
 		visited++
-		for db := 0; db < s.ks.NumDB; db++ {
-			if s.ks.ExpiresCount(db) == 0 {
+		for db := 0; db < s.keyspace.NumDB; db++ {
+			if s.keyspace.ExpiresCount(db) == 0 {
 				continue
 			}
 			for {
-				s.ks.LockShard(i, true)
-				if s.ks.VolatileLen(i, db) == 0 {
-					s.ks.UnlockShard(i, true)
+				s.keyspace.LockShard(i, true)
+				if s.keyspace.VolatileLen(i, db) == 0 {
+					s.keyspace.UnlockShard(i, true)
 					break
 				}
-				sampled, expired := s.ks.ExpireShard(i, db, 20, s.Now().UnixMilli(), hook)
-				s.ks.UnlockShard(i, true)
+				sampled, expired := s.keyspace.ExpireShard(i, db, 20, s.Now().UnixMilli(), hook)
+				s.keyspace.UnlockShard(i, true)
 				if sampled == 0 || expired*4 <= sampled || time.Since(start) >= budget {
 					break
 				}
@@ -54,7 +54,7 @@ func (s *Server) activeExpireCycle(cursor int) int {
 // when memory is still above the limit (the command must be refused).
 func (s *Server) performEvictions() bool {
 	max := s.cfg.MaxMemory.Load()
-	if max <= 0 || s.ks.UsedMemory() <= max {
+	if max <= 0 || s.keyspace.UsedMemory() <= max {
 		return true
 	}
 	policy := s.cfg.MaxMemoryPolicy.Load()
@@ -63,11 +63,11 @@ func (s *Server) performEvictions() bool {
 	}
 	volatile := policy >= config.PolicyVolatileLRU
 	samples := int(s.cfg.MaxMemorySamples.Load())
-	n := s.ks.NumShards()
+	n := s.keyspace.NumShards()
 	deadline := time.Now().Add(50 * time.Millisecond)
-	for s.ks.UsedMemory() > max {
+	for s.keyspace.UsedMemory() > max {
 		if time.Now().After(deadline) {
-			return s.ks.UsedMemory() <= max
+			return s.keyspace.UsedMemory() <= max
 		}
 		type cand struct {
 			db    int
@@ -78,13 +78,13 @@ func (s *Server) performEvictions() bool {
 		// Sample a few random shards for good approximation.
 		for attempt := 0; attempt < 4; attempt++ {
 			i := rand.IntN(n)
-			s.ks.LockShard(i, false)
-			for db := 0; db < s.ks.NumDB; db++ {
-				if s.ks.DBSize(db) == 0 || (volatile && s.ks.ExpiresCount(db) == 0) {
+			s.keyspace.LockShard(i, false)
+			for db := 0; db < s.keyspace.NumDB; db++ {
+				if s.keyspace.DBSize(db) == 0 || (volatile && s.keyspace.ExpiresCount(db) == 0) {
 					continue
 				}
-				for _, k := range s.ks.SampleShard(i, db, samples, volatile) {
-					d := storage.DB{KS: s.ks, Idx: db}
+				for _, k := range s.keyspace.SampleShard(i, db, samples, volatile) {
+					d := storage.DB{KS: s.keyspace, Idx: db}
 					e := d.Peek(k)
 					if e == nil {
 						continue
@@ -92,9 +92,9 @@ func (s *Server) performEvictions() bool {
 					var score float64
 					switch policy {
 					case config.PolicyAllKeysLRU, config.PolicyVolatileLRU:
-						score = float64(s.ks.Clock.Load() - e.LRU())
+						score = float64(s.keyspace.Clock.Load() - e.LRU())
 					case config.PolicyAllKeysLFU, config.PolicyVolatileLFU:
-						score = 255 - float64(s.ks.LFUCounter(e))
+						score = 255 - float64(s.keyspace.LFUCounter(e))
 					case config.PolicyVolatileTTL:
 						score = -float64(e.ExpireAt)
 					default:
@@ -105,13 +105,13 @@ func (s *Server) performEvictions() bool {
 					}
 				}
 			}
-			s.ks.UnlockShard(i, false)
+			s.keyspace.UnlockShard(i, false)
 		}
 		if best == nil {
 			// Nothing sampled: check whether anything is evictable at all.
 			any := false
-			for db := 0; db < s.ks.NumDB; db++ {
-				if (!volatile && s.ks.DBSize(db) > 0) || (volatile && s.ks.ExpiresCount(db) > 0) {
+			for db := 0; db < s.keyspace.NumDB; db++ {
+				if (!volatile && s.keyspace.DBSize(db) > 0) || (volatile && s.keyspace.ExpiresCount(db) > 0) {
 					any = true
 				}
 			}
@@ -120,15 +120,15 @@ func (s *Server) performEvictions() bool {
 			}
 			continue
 		}
-		i := s.ks.ShardOf(best.key)
-		s.ks.LockShard(i, true)
-		if s.ks.EvictKey(best.db, best.key) {
+		i := s.keyspace.ShardOf(best.key)
+		s.keyspace.LockShard(i, true)
+		if s.keyspace.EvictKey(best.db, best.key) {
 			s.stats.evictedKeys.Add(1)
-			s.prop.propagate([]propCmd{{db: best.db, args: [][]byte{[]byte("DEL"), []byte(best.key)}}}, false)
+			s.propagator.propagate([]propagatedCommand{{db: best.db, args: [][]byte{[]byte("DEL"), []byte(best.key)}}}, false)
 			s.watches.touch(best.db, []string{best.key})
 			s.notify(config.NotifyEvicted, "evicted", best.key, best.db)
 		}
-		s.ks.UnlockShard(i, true)
+		s.keyspace.UnlockShard(i, true)
 	}
 	return true
 }

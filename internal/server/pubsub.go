@@ -188,19 +188,19 @@ func (c *Client) updateSubCounts() {
 }
 
 func (c *Ctx) subscribe(kind subKind) {
-	cl := c.cl
+	cl := c.client
 	if cl == nil {
 		c.Err("ERR This command is not allowed from script")
 		return
 	}
 	cl.startPush()
 	subName, _ := kind.names()
-	h := c.s.pubsub
+	h := c.server.pubsub
 	m := cl.subMap(kind)
 	if *m == nil {
 		*m = map[string]struct{}{}
 	}
-	direct := c.W == cl.w
+	direct := c.W == cl.writer
 	if direct {
 		// Drain earlier pipelined replies without holding wmu, then hold
 		// wmu across hub registration and the acks. The push goroutine
@@ -209,12 +209,12 @@ func (c *Ctx) subscribe(kind subKind) {
 		// before the ack can be read). Auto-flush is suppressed because it
 		// would re-lock wmu through W.Mu.
 		_ = c.W.Flush()
-		cl.wmu.Lock()
+		cl.writeMu.Lock()
 		c.W.SetLockedSection(true)
 		defer func() {
 			_ = c.W.FlushLocked()
 			c.W.SetLockedSection(false)
-			cl.wmu.Unlock()
+			cl.writeMu.Unlock()
 		}()
 	}
 	// Queued path (MULTI/script): the ack is buffered in another writer, so
@@ -240,13 +240,13 @@ func (c *Ctx) subscribe(kind subKind) {
 }
 
 func (c *Ctx) unsubscribe(kind subKind) {
-	cl := c.cl
+	cl := c.client
 	if cl == nil {
 		c.Err("ERR This command is not allowed from script")
 		return
 	}
 	_, unsubName := kind.names()
-	h := c.s.pubsub
+	h := c.server.pubsub
 	m := cl.subMap(kind)
 	var names []string
 	if len(c.Args) > 1 {
@@ -295,18 +295,18 @@ func cmdPUnsubscribe(c *Ctx) { c.unsubscribe(kindPattern) }
 func cmdSUnsubscribe(c *Ctx) { c.unsubscribe(kindShard) }
 
 func cmdPublish(c *Ctx) {
-	c.W.WriteInt(c.s.publish(c.Args[1], c.Args[2], false))
-	c.s.prop.propagate([]propCmd{{db: c.DB.Idx, args: c.Args}}, false)
+	c.W.WriteInt(c.server.publish(c.Args[1], c.Args[2], false))
+	c.server.propagator.propagate([]propagatedCommand{{db: c.DB.Idx, args: c.Args}}, false)
 }
 
 func cmdSPublish(c *Ctx) {
-	c.W.WriteInt(c.s.publish(c.Args[1], c.Args[2], true))
-	c.s.prop.propagate([]propCmd{{db: c.DB.Idx, args: c.Args}}, false)
+	c.W.WriteInt(c.server.publish(c.Args[1], c.Args[2], true))
+	c.server.propagator.propagate([]propagatedCommand{{db: c.DB.Idx, args: c.Args}}, false)
 }
 
 func cmdPubsub(c *Ctx) {
 	sub := string(lowerBytes(c.Args[1]))
-	h := c.s.pubsub
+	h := c.server.pubsub
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	switch sub {

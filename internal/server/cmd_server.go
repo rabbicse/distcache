@@ -21,7 +21,7 @@ func cmdPing(c *Ctx) {
 		c.WrongArgs()
 		return
 	}
-	if c.cl != nil && c.cl.inPubSub() && c.W.Proto < 3 {
+	if c.client != nil && c.client.inPubSub() && c.W.Proto < 3 {
 		c.W.WriteArrayLen(2)
 		c.W.WriteBulkString("pong")
 		if len(c.Args) == 2 {
@@ -42,29 +42,29 @@ func cmdEcho(c *Ctx) { c.W.WriteBulk(c.Args[1]) }
 
 func cmdQuit(c *Ctx) {
 	c.W.WriteOK()
-	if c.cl != nil {
-		c.cl.closeAfterReply = true
+	if c.client != nil {
+		c.client.closeAfterReply = true
 	}
 }
 
 func cmdReset(c *Ctx) {
-	cl := c.cl
+	cl := c.client
 	cl.multi = nil
 	cl.multiLen.Store(-1)
-	c.s.watches.unwatchAll(cl)
-	c.s.pubsub.unsubscribeAll(cl)
-	c.s.removeMonitor(cl)
+	c.server.watches.unwatchAll(cl)
+	c.server.pubsub.unsubscribeAll(cl)
+	c.server.removeMonitor(cl)
 	cl.isMonitor = false
 	cl.db = 0
 	cl.dbAtomic.Store(0)
 	cl.proto = 2
-	cl.w.Proto = 2
+	cl.writer.Proto = 2
 	c.W.Proto = 2
 	cl.name.Store("")
 	cl.replyMode = replyOn
 	cl.noEvict = false
 	cl.noTouch = false
-	cl.authed = !c.s.cfg.RequirePassSet.Load()
+	cl.authed = !c.server.cfg.RequirePassSet.Load()
 	c.W.WriteSimple("RESET")
 }
 
@@ -88,21 +88,21 @@ func cmdAuth(c *Ctx) {
 	if len(c.Args) == 3 {
 		user, pass = c.Arg(1), c.Arg(2)
 	}
-	if len(c.Args) == 2 && !c.s.cfg.RequirePassSet.Load() {
+	if len(c.Args) == 2 && !c.server.cfg.RequirePassSet.Load() {
 		c.Err("ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?")
 		return
 	}
-	if !c.s.checkPassword(user, pass) {
+	if !c.server.checkPassword(user, pass) {
 		c.Err("WRONGPASS invalid username-password pair or user is disabled.")
 		return
 	}
-	c.cl.authed = true
-	c.cl.user = user
+	c.client.authed = true
+	c.client.user = user
 	c.W.WriteOK()
 }
 
 func cmdHello(c *Ctx) {
-	cl := c.cl
+	cl := c.client
 	proto := cl.proto
 	i := 1
 	if len(c.Args) > 1 {
@@ -124,7 +124,7 @@ func cmdHello(c *Ctx) {
 		left := len(c.Args) - i - 1
 		switch {
 		case c.Is(i, "auth") && left >= 2:
-			if !c.s.checkPassword(c.Arg(i+1), c.Arg(i+2)) {
+			if !c.server.checkPassword(c.Arg(i+1), c.Arg(i+2)) {
 				c.Err("WRONGPASS invalid username-password pair or user is disabled.")
 				return
 			}
@@ -152,10 +152,10 @@ func cmdHello(c *Ctx) {
 		cl.name.Store(name)
 	}
 	cl.proto = proto
-	cl.w.Proto = proto
+	cl.writer.Proto = proto
 	c.W.Proto = proto
 	role := "master"
-	if c.s.repl.isReplica() {
+	if c.server.replication.isReplica() {
 		role = "replica"
 	}
 	c.W.WriteMapLen(7)
@@ -185,8 +185,8 @@ func validClientName(b []byte) bool {
 }
 
 func cmdClient(c *Ctx) {
-	s := c.s
-	cl := c.cl
+	s := c.server
+	cl := c.client
 	sub := strings.ToLower(c.Arg(1))
 	switch sub {
 	case "id":
@@ -438,14 +438,14 @@ func (s *Server) sortedClients() []*Client {
 }
 
 func clientKill(c *Ctx) {
-	s := c.s
+	s := c.server
 	if len(c.Args) == 3 {
 		addr := c.Arg(2)
 		for _, o := range s.sortedClients() {
 			if o.addr == addr {
 				_ = o.conn.Close() // best-effort: cleanup after failure or teardown
-				if o == c.cl {
-					c.cl.closeAfterReply = true
+				if o == c.client {
+					c.client.closeAfterReply = true
 				}
 				c.W.WriteOK()
 				return
@@ -519,12 +519,12 @@ func clientKill(c *Ctx) {
 		if maxAge > 0 && time.Since(o.created) < time.Duration(maxAge)*time.Second {
 			continue
 		}
-		if o == c.cl && skipme {
+		if o == c.client && skipme {
 			continue
 		}
 		_ = o.conn.Close() // best-effort: cleanup after failure or teardown
-		if o == c.cl {
-			c.cl.closeAfterReply = true
+		if o == c.client {
+			c.client.closeAfterReply = true
 		}
 		killed++
 	}
@@ -532,7 +532,7 @@ func clientKill(c *Ctx) {
 }
 
 func cmdConfig(c *Ctx) {
-	cfg := c.s.cfg
+	cfg := c.server.cfg
 	switch strings.ToLower(c.Arg(1)) {
 	case "get":
 		if len(c.Args) < 3 {
@@ -565,11 +565,11 @@ func cmdConfig(c *Ctx) {
 				c.Err("ERR " + err.Error())
 				return
 			}
-			c.s.applyConfigChange(name)
+			c.server.applyConfigChange(name)
 		}
 		c.W.WriteOK()
 	case "resetstat":
-		c.s.resetStats()
+		c.server.resetStats()
 		c.W.WriteOK()
 	case "rewrite":
 		if err := cfg.Rewrite(); err != nil {
@@ -604,14 +604,14 @@ func (s *Server) applyConfigChange(name string) {
 				}
 			}()
 		} else {
-			s.prop.closeAOF()
+			s.propagator.closeAOF()
 		}
 	case "maxmemory":
 		go s.performEvictions()
 	case "lfu-log-factor":
-		s.ks.LFULogFactor.Store(s.cfg.LFULogFactor.Load())
+		s.keyspace.LFULogFactor.Store(s.cfg.LFULogFactor.Load())
 	case "lfu-decay-time":
-		s.ks.LFUDecayTime.Store(s.cfg.LFUDecayTime.Load())
+		s.keyspace.LFUDecayTime.Store(s.cfg.LFUDecayTime.Load())
 	case "requirepass":
 		// Existing connections stay authenticated, like Redis.
 	}
@@ -630,7 +630,7 @@ func (s *Server) resetStats() {
 	st.netOutput.Store(0)
 	st.pubsubMessages.Store(0)
 	st.errorReplies.Store(0)
-	for _, cmd := range s.cmds {
+	for _, cmd := range s.commands {
 		cmd.Calls.Store(0)
 		cmd.Usec.Store(0)
 		cmd.Rejected.Store(0)
@@ -639,20 +639,20 @@ func (s *Server) resetStats() {
 }
 
 func cmdTime(c *Ctx) {
-	now := c.s.Now()
+	now := c.server.Now()
 	c.W.WriteArrayLen(2)
 	c.W.WriteBulkString(strconv.FormatInt(now.Unix(), 10))
 	c.W.WriteBulkString(strconv.FormatInt(int64(now.Nanosecond()/1000), 10))
 }
 
-func cmdLastSave(c *Ctx) { c.W.WriteInt(c.s.stats.lastSaveTime.Load()) }
+func cmdLastSave(c *Ctx) { c.W.WriteInt(c.server.stats.lastSaveTime.Load()) }
 
 func cmdSave(c *Ctx) {
-	if c.s.bgsave.Load() {
+	if c.server.bgsave.Load() {
 		c.Err("ERR Background save already in progress")
 		return
 	}
-	if err := c.s.saveSync(); err != nil {
+	if err := c.server.saveSync(); err != nil {
 		c.Err("ERR " + err.Error())
 		return
 	}
@@ -664,7 +664,7 @@ func cmdBgSave(c *Ctx) {
 		c.SyntaxErr()
 		return
 	}
-	if err := c.s.bgSave(); err != nil {
+	if err := c.server.bgSave(); err != nil {
 		if len(c.Args) == 2 {
 			c.W.WriteSimple("Background saving scheduled")
 			return
@@ -676,16 +676,16 @@ func cmdBgSave(c *Ctx) {
 }
 
 func cmdBgRewriteAOF(c *Ctx) {
-	if c.s.aofRewr.Load() {
+	if c.server.aofRewriting.Load() {
 		c.Err("ERR Background append only file rewriting already in progress")
 		return
 	}
-	go func() { _ = c.s.rewriteAOF() }()
+	go func() { _ = c.server.rewriteAOF() }()
 	c.W.WriteSimple("Background append only file rewriting started")
 }
 
 func cmdShutdown(c *Ctx) {
-	save := len(c.s.cfg.Save) > 0 || c.s.cfg.AppendOnly.Load()
+	save := len(c.server.cfg.Save) > 0 || c.server.cfg.AppendOnly.Load()
 	for i := 1; i < len(c.Args); i++ {
 		switch {
 		case c.Is(i, "nosave"):
@@ -701,29 +701,29 @@ func cmdShutdown(c *Ctx) {
 			return
 		}
 	}
-	if save && !c.s.cfg.AppendOnly.Load() {
-		if err := c.s.saveSync(); err != nil {
+	if save && !c.server.cfg.AppendOnly.Load() {
+		if err := c.server.saveSync(); err != nil {
 			c.Err("ERR Errors trying to SHUTDOWN. Check logs.")
 			return
 		}
 	}
-	go func() { _ = c.s.Shutdown(false) }()
-	if c.cl != nil {
-		c.cl.closeAfterReply = true
+	go func() { _ = c.server.Shutdown(false) }()
+	if c.client != nil {
+		c.client.closeAfterReply = true
 	}
 }
 
 func cmdMonitor(c *Ctx) {
-	cl := c.cl
+	cl := c.client
 	if cl.isMonitor {
 		c.W.WriteOK()
 		return
 	}
 	cl.startPush()
-	c.s.monitorsMu.Lock()
-	c.s.monitors[cl] = struct{}{}
-	c.s.monitorN.Add(1)
-	c.s.monitorsMu.Unlock()
+	c.server.monitorsMu.Lock()
+	c.server.monitors[cl] = struct{}{}
+	c.server.monitorN.Add(1)
+	c.server.monitorsMu.Unlock()
 	cl.isMonitor = true
 	c.W.WriteOK()
 }
@@ -742,7 +742,7 @@ func cmdMemory(c *Ctx) {
 		key := c.Arg(2)
 		var mem int64 = -1
 		c.withKeys([]string{key}, false, func() {
-			db := c.s.newDB(c.cl, false)
+			db := c.server.newDB(c.client, false)
 			db.NoTouch = true
 			if e := db.Lookup(key); e != nil {
 				mem = storage.EntryOverhead + int64(len(key)) + storage.ValueBytes(e.Value)
@@ -756,18 +756,18 @@ func cmdMemory(c *Ctx) {
 	case "stats":
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		used := c.s.ks.UsedMemory()
+		used := c.server.keyspace.UsedMemory()
 		var keys int64
-		for d := 0; d < c.s.ks.NumDB; d++ {
-			keys += c.s.ks.DBSize(d)
+		for d := 0; d < c.server.keyspace.NumDB; d++ {
+			keys += c.server.keyspace.DBSize(d)
 		}
 		pairs := []struct {
 			k string
 			v int64
 		}{
 			{"peak.allocated", int64(ms.HeapSys)}, {"total.allocated", int64(ms.HeapAlloc)},
-			{"startup.allocated", 0}, {"replication.backlog", int64(c.s.repl.backlogSize())},
-			{"clients.slaves", 0}, {"clients.normal", int64(c.s.clientCount()) * 32768},
+			{"startup.allocated", 0}, {"replication.backlog", int64(c.server.replication.backlogSize())},
+			{"clients.slaves", 0}, {"clients.normal", int64(c.server.clientCount()) * 32768},
 			{"aof.buffer", 0}, {"keys.count", keys}, {"dataset.bytes", used},
 		}
 		c.W.WriteMapLen(len(pairs))
@@ -842,12 +842,12 @@ func cmdModule(c *Ctx) {
 func cmdACL(c *Ctx) {
 	switch strings.ToLower(c.Arg(1)) {
 	case "whoami":
-		c.W.WriteBulkString(c.cl.user)
+		c.W.WriteBulkString(c.client.user)
 	case "users":
 		c.W.WriteStrings([]string{"default"})
 	case "list":
 		pass := "nopass"
-		if c.s.cfg.RequirePassSet.Load() {
+		if c.server.cfg.RequirePassSet.Load() {
 			pass = "#<redacted>"
 		}
 		c.W.WriteStrings([]string{"user default on " + pass + " sanitize-payload ~* &* +@all"})
@@ -858,7 +858,7 @@ func cmdACL(c *Ctx) {
 		if len(c.Args) == 3 {
 			cat := strings.ToLower(c.Arg(2))
 			var names []string
-			for _, cmd := range c.s.cmds {
+			for _, cmd := range c.server.commands {
 				if cmd.Group == cat || (cat == "write" && cmd.Has(FlagWrite)) || (cat == "read" && cmd.Has(FlagReadonly)) ||
 					(cat == "fast" && cmd.Has(FlagFast)) || (cat == "admin" && cmd.Has(FlagAdmin)) || (cat == "blocking" && cmd.Has(FlagBlocking)) {
 					names = append(names, cmd.Name)
@@ -922,7 +922,7 @@ func cmdDebug(c *Ctx) {
 			c.WrongSubArgs()
 			return
 		}
-		c.s.cfg.ActiveExpire.Store(c.Arg(2) != "0")
+		c.server.cfg.ActiveExpire.Store(c.Arg(2) != "0")
 		c.W.WriteOK()
 	case "object":
 		if len(c.Args) != 3 {
@@ -932,12 +932,12 @@ func cmdDebug(c *Ctx) {
 		var out string
 		found := false
 		c.withKeys([]string{c.Arg(2)}, false, func() {
-			db := c.s.newDB(c.cl, false)
+			db := c.server.newDB(c.client, false)
 			db.NoTouch = true
 			if e := db.Lookup(c.Arg(2)); e != nil {
 				found = true
 				out = fmt.Sprintf("Value at:0x0 refcount:1 encoding:%s serializedlength:%d lru:%d lru_seconds_idle:%d",
-					c.s.objectEncoding(e.Value), len(storage.EncodeValue(e.Value)), e.LRU(), c.s.ks.Clock.Load()-e.LRU())
+					c.server.objectEncoding(e.Value), len(storage.EncodeValue(e.Value)), e.LRU(), c.server.keyspace.Clock.Load()-e.LRU())
 			}
 		})
 		if !found {
@@ -946,19 +946,19 @@ func cmdDebug(c *Ctx) {
 		}
 		c.W.WriteSimple(out)
 	case "reload":
-		if err := c.s.debugReload(); err != nil {
+		if err := c.server.debugReload(); err != nil {
 			c.Err("ERR " + err.Error())
 			return
 		}
 		c.W.WriteOK()
 	case "log":
-		c.s.log.Warn("DEBUG LOG: " + strings.Join(argStrings(c.Args[2:]), " "))
+		c.server.log.Warn("DEBUG LOG: " + strings.Join(argStrings(c.Args[2:]), " "))
 		c.W.WriteOK()
 	case "change-repl-id":
-		c.s.repl.changeReplID()
+		c.server.replication.changeReplID()
 		c.W.WriteOK()
 	case "digest":
-		c.W.WriteBulkString(c.s.digest())
+		c.W.WriteBulkString(c.server.digest())
 	case "jmap", "quicklist-packed-threshold", "stringmatch-len", "listpack", "set-disable-deny-scripts",
 		"replybuffer", "dict-resizing", "pause-cron":
 		c.W.WriteOK()
@@ -975,11 +975,11 @@ func (s *Server) debugReload() error {
 	if err := s.writeSnapshot(&buf, nil); err != nil {
 		return err
 	}
-	s.ks.HoldSnapshots()
-	defer s.ks.ReleaseSnapshots()
-	s.ks.LockAll(true)
-	defer s.ks.UnlockAll(true)
-	s.ks.FlushAll()
+	s.keyspace.HoldSnapshots()
+	defer s.keyspace.ReleaseSnapshots()
+	s.keyspace.LockAll(true)
+	defer s.keyspace.UnlockAll(true)
+	s.keyspace.FlushAll()
 	_, err := s.loadSnapshot(newBufioReader(buf.b))
 	return err
 }
@@ -987,12 +987,12 @@ func (s *Server) debugReload() error {
 // digest returns a dataset fingerprint independent of iteration order.
 func (s *Server) digest() string {
 	var acc [20]byte
-	s.ks.LockAll(false)
-	defer s.ks.UnlockAll(false)
+	s.keyspace.LockAll(false)
+	defer s.keyspace.UnlockAll(false)
 	empty := true
-	for i := 0; i < s.ks.NumShards(); i++ {
-		for d := 0; d < s.ks.NumDB; d++ {
-			s.ks.ForEachInShard(i, d, func(k string, e *storage.Entry) bool {
+	for i := 0; i < s.keyspace.NumShards(); i++ {
+		for d := 0; d < s.keyspace.NumDB; d++ {
+			s.keyspace.ForEachInShard(i, d, func(k string, e *storage.Entry) bool {
 				empty = false
 				h := sha1Sum([]byte(strconv.Itoa(d) + "\x00" + k + "\x00" + string(storage.EncodeValue(canonicalValue(e.Value))) + strconv.FormatInt(e.ExpireAt, 10)))
 				for j := range acc {
@@ -1034,7 +1034,7 @@ func canonicalValue(v any) any {
 	return v
 }
 
-func cmdRole(c *Ctx) { c.s.repl.writeRole(c) }
+func cmdRole(c *Ctx) { c.server.replication.writeRole(c) }
 
 // ---- INFO ----
 
@@ -1073,7 +1073,7 @@ func cmdInfo(c *Ctx) {
 			fmt.Fprintf(&b, "%v:%v\r\n", kv[i], kv[i+1])
 		}
 	}
-	s := c.s
+	s := c.server
 	now := time.Now()
 	uptime := int64(now.Sub(s.startTime).Seconds())
 	if want("server", true) {
@@ -1098,11 +1098,11 @@ func cmdInfo(c *Ctx) {
 			"uptime_in_days", uptime/86400,
 			"hz", s.cfg.Hz.Load(),
 			"configured_hz", s.cfg.Hz.Load(),
-			"lru_clock", s.ks.Clock.Load()&((1<<24)-1),
+			"lru_clock", s.keyspace.Clock.Load()&((1<<24)-1),
 			"executable", executable(),
 			"config_file", s.cfg.ConfigFile,
 			"io_threads_active", 0,
-			"shards", s.ks.NumShards(),
+			"shards", s.keyspace.NumShards(),
 			"gomaxprocs", runtime.GOMAXPROCS(0),
 		)
 	}
@@ -1137,7 +1137,7 @@ func cmdInfo(c *Ctx) {
 	if want("memory", true) {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		used := s.ks.UsedMemory()
+		used := s.keyspace.UsedMemory()
 		maxm := s.cfg.MaxMemory.Load()
 		add("Memory",
 			"used_memory", used,
@@ -1159,7 +1159,7 @@ func cmdInfo(c *Ctx) {
 		)
 	}
 	if want("persistence", true) {
-		aofSize, aofOn, _ := s.prop.aofStats()
+		aofSize, aofOn, _ := s.propagator.aofStats()
 		status := "ok"
 		if !s.stats.lastBgsaveOK.Load() {
 			status = "err"
@@ -1178,7 +1178,7 @@ func cmdInfo(c *Ctx) {
 			"rdb_last_bgsave_status", status,
 			"rdb_last_bgsave_time_sec", s.stats.lastBgsaveSeconds.Load(),
 			"aof_enabled", b2i(aofOn),
-			"aof_rewrite_in_progress", b2i(s.aofRewr.Load()),
+			"aof_rewrite_in_progress", b2i(s.aofRewriting.Load()),
 			"aof_rewrite_scheduled", 0,
 			"aof_last_bgrewrite_status", aofStatus,
 			"aof_rewrites", s.stats.aofRewrites.Load(),
@@ -1214,7 +1214,7 @@ func cmdInfo(c *Ctx) {
 	}
 	if want("replication", true) {
 		b.WriteString("\r\n")
-		b.WriteString(s.repl.infoSection())
+		b.WriteString(s.replication.infoSection())
 	}
 	if want("cpu", true) {
 		u, sy := cpuTimes()
@@ -1229,13 +1229,13 @@ func cmdInfo(c *Ctx) {
 	}
 	if want("commandstats", false) {
 		var kv []any
-		names := make([]string, 0, len(s.cmds))
-		for n := range s.cmds {
+		names := make([]string, 0, len(s.commands))
+		for n := range s.commands {
 			names = append(names, n)
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			cmd := s.cmds[n]
+			cmd := s.commands[n]
 			calls := cmd.Calls.Load()
 			if calls == 0 && cmd.Rejected.Load() == 0 {
 				continue
@@ -1258,12 +1258,12 @@ func cmdInfo(c *Ctx) {
 	}
 	if want("keyspace", true) {
 		var kv []any
-		for d := 0; d < s.ks.NumDB; d++ {
-			n := s.ks.DBSize(d)
+		for d := 0; d < s.keyspace.NumDB; d++ {
+			n := s.keyspace.DBSize(d)
 			if n == 0 {
 				continue
 			}
-			kv = append(kv, "db"+strconv.Itoa(d), fmt.Sprintf("keys=%d,expires=%d,avg_ttl=0,subexpiry=0", n, s.ks.ExpiresCount(d)))
+			kv = append(kv, "db"+strconv.Itoa(d), fmt.Sprintf("keys=%d,expires=%d,avg_ttl=0,subexpiry=0", n, s.keyspace.ExpiresCount(d)))
 		}
 		add("Keyspace", kv...)
 	}
@@ -1342,7 +1342,7 @@ func cmdWait(c *Ctx) {
 		c.Err(errNegTimeout)
 		return
 	}
-	c.W.WriteInt(int64(c.s.repl.waitReplicas(int(n), to)))
+	c.W.WriteInt(int64(c.server.replication.waitReplicas(int(n), to)))
 }
 
 func cmdWaitAOF(c *Ctx) {
@@ -1358,21 +1358,21 @@ func cmdWaitAOF(c *Ctx) {
 	if !ok {
 		return
 	}
-	_, aofOn, _ := c.s.prop.aofStats()
+	_, aofOn, _ := c.server.propagator.aofStats()
 	if local > 0 && !aofOn {
 		c.Err("ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled.")
 		return
 	}
 	if aofOn {
-		c.s.prop.mu.Lock()
-		c.s.prop.flushAOFLocked()
-		f := c.s.prop.aofFile
-		c.s.prop.mu.Unlock()
+		c.server.propagator.mu.Lock()
+		c.server.propagator.flushAOFLocked()
+		f := c.server.propagator.aofFile
+		c.server.propagator.mu.Unlock()
 		if f != nil {
 			_ = f.Sync()
 		}
 	}
-	reps := c.s.repl.waitReplicas(int(n), to)
+	reps := c.server.replication.waitReplicas(int(n), to)
 	c.W.WriteArrayLen(2)
 	c.W.WriteInt(int64(b2i(aofOn)))
 	c.W.WriteInt(int64(reps))

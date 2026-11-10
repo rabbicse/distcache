@@ -58,7 +58,7 @@ var (
 )
 
 // propagate encodes and distributes commands. wrap forces MULTI/EXEC.
-func (p *propagator) propagate(cmds []propCmd, wrap bool) {
+func (p *propagator) propagate(cmds []propagatedCommand, wrap bool) {
 	if len(cmds) == 0 {
 		return
 	}
@@ -233,11 +233,11 @@ func (p *propagator) aofStats() (size int64, enabled bool, err error) {
 // rewriteAOF builds a compact AOF: a point-in-time snapshot preamble
 // followed by the commands executed while it was being written.
 func (s *Server) rewriteAOF() error {
-	if !s.aofRewr.CompareAndSwap(false, true) {
+	if !s.aofRewriting.CompareAndSwap(false, true) {
 		return errors.New("Background append only file rewriting already in progress")
 	}
-	defer s.aofRewr.Store(false)
-	p := s.prop
+	defer s.aofRewriting.Store(false)
+	p := s.propagator
 	dir := s.cfg.Dir
 	tmp := filepath.Join(dir, fmt.Sprintf("temp-rewriteaof-%d.aof", time.Now().UnixNano()))
 	f, err := os.Create(tmp)
@@ -245,17 +245,17 @@ func (s *Server) rewriteAOF() error {
 		s.stats.lastAofRewriteOK.Store(false)
 		return err
 	}
-	s.ks.BeginSnapshot(func() {
+	s.keyspace.BeginSnapshot(func() {
 		p.mu.Lock()
 		p.rewrite = &bytes.Buffer{}
 		p.lastDB = -1
 		p.mu.Unlock()
 	})
 	enc := storage.NewEncoder(f)
-	for i := 0; i < s.ks.NumShards(); i++ {
-		s.ks.SnapshotShard(i, func(db int, key string, e *storage.Entry) { enc.WriteEntry(db, key, e) })
+	for i := 0; i < s.keyspace.NumShards(); i++ {
+		s.keyspace.SnapshotShard(i, func(db int, key string, e *storage.Entry) { enc.WriteEntry(db, key, e) })
 	}
-	s.ks.EndSnapshot()
+	s.keyspace.EndSnapshot()
 	for _, code := range s.scripts.libraryCodes() {
 		enc.WriteAux("function", []byte(code))
 	}
@@ -352,7 +352,7 @@ func (s *Server) loadAOF(path string) error {
 		}
 	}
 	fake := &Client{s: s, isMaster: true, proto: 2}
-	fake.w = resp.NewWriter(nil, 2)
+	fake.writer = resp.NewWriter(nil, 2)
 	fake.name.Store("aof-loader")
 	fake.lastCmd.Store("")
 	r := resp.NewReader(br, 1<<16)
@@ -386,7 +386,7 @@ func (s *Server) loadAOF(path string) error {
 			inMulti = false
 		}
 		s.processCommand(fake, args)
-		fake.w.Reset()
+		fake.writer.Reset()
 		cmds++
 	}
 	if inMulti {

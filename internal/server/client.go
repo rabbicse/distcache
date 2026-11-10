@@ -23,14 +23,14 @@ const (
 
 // Client is one connection.
 type Client struct {
-	s     *Server
-	id    int64
-	conn  net.Conn
-	r     *resp.Reader
-	w     *resp.Writer
-	wmu   sync.Mutex // serialises every write to conn: replies (via w.Mu), pushes, replication
-	db    int
-	proto int
+	s       *Server
+	id      int64
+	conn    net.Conn
+	reader  *resp.Reader
+	writer  *resp.Writer
+	writeMu sync.Mutex // serialises every write to conn: replies (via w.Mu), pushes, replication
+	db      int
+	proto   int
 
 	name    atomic.Value // string
 	libName atomic.Value
@@ -76,16 +76,16 @@ func (s *Server) newClient(conn net.Conn) *Client {
 		s:         s,
 		id:        s.nextID.Add(1),
 		conn:      conn,
-		r:         resp.NewReader(&countingReader{conn, &s.stats.netInput}, 16*1024),
+		reader:    resp.NewReader(&countingReader{conn, &s.stats.netInput}, 16*1024),
 		proto:     2,
 		created:   time.Now(),
 		unblockCh: make(chan int, 1),
 		addr:      conn.RemoteAddr().String(),
 		laddr:     conn.LocalAddr().String(),
 	}
-	c.w = resp.NewWriter(&countingWriter{conn, &s.stats.netOutput}, 2)
-	c.w.Mu = &c.wmu
-	c.r.MaxBulkLen = s.cfg.ProtoMaxBulkLen.Load()
+	c.writer = resp.NewWriter(&countingWriter{conn, &s.stats.netOutput}, 2)
+	c.writer.Mu = &c.writeMu
+	c.reader.MaxBulkLen = s.cfg.ProtoMaxBulkLen.Load()
 	c.name.Store("")
 	c.libName.Store("")
 	c.libVer.Store("")
@@ -125,7 +125,7 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // flush sends buffered replies. The writer takes wmu itself (see newClient),
 // so callers must not hold wmu.
 func (c *Client) flush() error {
-	return c.w.Flush()
+	return c.writer.Flush()
 }
 
 func (c *Client) inPubSub() bool { return c.subCount.Load() > 0 }
@@ -150,11 +150,11 @@ func (s *Server) serveClient(c *Client) {
 		} else if to > 0 {
 			_ = c.conn.SetReadDeadline(time.Time{})
 		}
-		args, err := c.r.ReadCommand()
+		args, err := c.reader.ReadCommand()
 		if err != nil {
 			var pe *resp.ProtocolError
 			if errors.As(err, &pe) {
-				c.w.WriteError("ERR " + pe.Error())
+				c.writer.WriteError("ERR " + pe.Error())
 				_ = c.flush()
 			}
 			return
@@ -168,14 +168,14 @@ func (s *Server) serveClient(c *Client) {
 			_ = c.flush()
 			return
 		}
-		if c.r.Buffered() == 0 || c.w.Len() > 64*1024 {
+		if c.reader.Buffered() == 0 || c.writer.Len() > 64*1024 {
 			if err := c.flush(); err != nil {
 				return
 			}
 		}
 		if c.isReplica {
 			// Connection handed over to replication streaming.
-			s.repl.serveReplica(c)
+			s.replication.serveReplica(c)
 			return
 		}
 	}
@@ -196,7 +196,7 @@ func (s *Server) closeClient(c *Client) {
 	delete(s.clients, c.id)
 	s.clientsMu.Unlock()
 	if c.replica != nil {
-		s.repl.removeReplica(c.replica)
+		s.replication.removeReplica(c.replica)
 	}
 }
 
@@ -219,9 +219,9 @@ func (c *Client) startPush() {
 	c.pushCh = ch
 	go func() {
 		for msg := range ch {
-			c.wmu.Lock()
-			_, err := c.w.Out.Write(msg)
-			c.wmu.Unlock()
+			c.writeMu.Lock()
+			_, err := c.writer.Out.Write(msg)
+			c.writeMu.Unlock()
 			if err != nil {
 				_ = c.conn.Close() // best-effort: cleanup after failure or teardown
 				for range ch {

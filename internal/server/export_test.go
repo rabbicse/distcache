@@ -11,7 +11,7 @@ import (
 // connects (right after testutil.StartServer returns, before dialling) and
 // never while commands are executing.
 func (s *Server) RegisterTestCommand(name string, h func(*Ctx)) {
-	s.addCommand(regSpec{name, -1, "write", 1, 1, 1, "test", h, nil}, nil, nil)
+	s.addCommand(commandSpec{name, -1, "write", 1, 1, 1, "test", h, nil}, nil, nil)
 }
 
 // CommandNames returns the sorted names of every registered top-level command.
@@ -24,10 +24,10 @@ func (s *Server) CommandNames() []string { return s.sortedCommandNames() }
 // returned function is not safe for concurrent use.
 func (s *Server) DispatchFunc(argv [][]byte) func() {
 	c := s.NewSession().c
-	c.w = resp.NewWriter(io.Discard, 2)
-	c.w.Mu = &c.wmu
+	c.writer = resp.NewWriter(io.Discard, 2)
+	c.writer.Mu = &c.writeMu
 	return func() {
 		s.processCommand(c, argv)
-		c.w.Reset()
+		c.writer.Reset()
 	}
 }

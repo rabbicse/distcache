@@ -112,11 +112,11 @@ func expireGeneric(c *Ctx, unitSeconds, absolute bool) {
 		c.W.WriteInt(0)
 		return
 	}
-	if when <= c.NowMs() && !c.isMaster && !c.s.loading.Load() {
+	if when <= c.NowMs() && !c.isMaster && !c.server.loading.Load() {
 		c.DB.Delete(key)
 		c.Dirty(1)
 		c.RewriteStrings("DEL", key)
-		c.s.notify(config.NotifyGeneric, "del", key, c.DB.Idx)
+		c.server.notify(config.NotifyGeneric, "del", key, c.DB.Idx)
 		c.W.WriteInt(1)
 		return
 	}
@@ -182,8 +182,8 @@ func cmdKeys(c *Ctx) {
 	all := pat == "*"
 	var out []string
 	c.forEachShard(false, func(i int) bool {
-		db := storage.DB{KS: c.s.ks, Idx: c.DB.Idx, Now: c.s.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
-		c.s.ks.ForEachInShard(i, c.DB.Idx, func(k string, e *storage.Entry) bool {
+		db := storage.DB{KS: c.server.keyspace, Idx: c.DB.Idx, Now: c.server.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
+		c.server.keyspace.ForEachInShard(i, c.DB.Idx, func(k string, e *storage.Entry) bool {
 			if db.IsExpired(e) {
 				return true
 			}
@@ -237,7 +237,7 @@ func cmdScan(c *Ctx) {
 		}
 		i++
 	}
-	n := uint64(c.s.ks.NumShards())
+	n := uint64(c.server.keyspace.NumShards())
 	if cursor >= n {
 		c.W.WriteArrayLen(2)
 		c.W.WriteBulkString("0")
@@ -249,8 +249,8 @@ func cmdScan(c *Ctx) {
 	for next < n && int64(len(keys)) < count {
 		i := int(next)
 		c.withShard(i, false, func() {
-			db := storage.DB{KS: c.s.ks, Idx: c.DB.Idx, Now: c.s.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
-			c.s.ks.ForEachInShard(i, c.DB.Idx, func(k string, e *storage.Entry) bool {
+			db := storage.DB{KS: c.server.keyspace, Idx: c.DB.Idx, Now: c.server.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
+			c.server.keyspace.ForEachInShard(i, c.DB.Idx, func(k string, e *storage.Entry) bool {
 				if db.IsExpired(e) {
 					return true
 				}
@@ -275,11 +275,11 @@ func cmdScan(c *Ctx) {
 }
 
 func cmdRandomKey(c *Ctx) {
-	if c.s.ks.DBSize(c.DB.Idx) == 0 {
+	if c.server.keyspace.DBSize(c.DB.Idx) == 0 {
 		c.W.WriteNull()
 		return
 	}
-	n := c.s.ks.NumShards()
+	n := c.server.keyspace.NumShards()
 	// Random sampling first; with few keys it can miss every populated
 	// shard, so fall back to an ordered pass over all shards (from a random
 	// start) so a non-empty database never yields nil.
@@ -292,8 +292,8 @@ func cmdRandomKey(c *Ctx) {
 		var found string
 		var ok bool
 		c.withShard(i, false, func() {
-			db := storage.DB{KS: c.s.ks, Idx: c.DB.Idx, Now: c.s.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
-			for _, k := range c.s.ks.SampleShard(i, c.DB.Idx, 8, false) {
+			db := storage.DB{KS: c.server.keyspace, Idx: c.DB.Idx, Now: c.server.Now().UnixMilli(), IgnoreExpiry: c.DB.IgnoreExpiry}
+			for _, k := range c.server.keyspace.SampleShard(i, c.DB.Idx, 8, false) {
 				if e := db.Peek(k); e != nil && !db.IsExpired(e) {
 					found, ok = k, true
 					return
@@ -330,12 +330,12 @@ func renameGeneric(c *Ctx, nx bool) {
 	at := e.ExpireAt
 	v := e.Value
 	c.DB.Delete(src)
-	ne := c.s.ks.NewEntry(v)
+	ne := c.server.keyspace.NewEntry(v)
 	ne.ExpireAt = at
 	c.DB.Set(dst, ne)
 	c.Dirty(1)
-	c.s.notify(config.NotifyGeneric, "rename_from", src, c.DB.Idx)
-	c.s.notify(config.NotifyGeneric, "rename_to", dst, c.DB.Idx)
+	c.server.notify(config.NotifyGeneric, "rename_from", src, c.DB.Idx)
+	c.server.notify(config.NotifyGeneric, "rename_to", dst, c.DB.Idx)
 	if nx {
 		c.W.WriteInt(1)
 	} else {
@@ -352,7 +352,7 @@ func (c *Ctx) parseDBIndex(i int) (int, bool) {
 		c.Err(errNotInt)
 		return 0, false
 	}
-	if n < 0 || n >= int64(c.s.ks.NumDB) {
+	if n < 0 || n >= int64(c.server.keyspace.NumDB) {
 		c.Err(errDBIndex)
 		return 0, false
 	}
@@ -382,12 +382,12 @@ func cmdMove(c *Ctx) {
 	}
 	dst.Preserve(key)
 	c.DB.Delete(key)
-	ne := c.s.ks.NewEntry(e.Value)
+	ne := c.server.keyspace.NewEntry(e.Value)
 	ne.ExpireAt = e.ExpireAt
 	dst.Set(key, ne)
 	c.Dirty(1)
-	c.s.watches.touch(dbi, []string{key})
-	c.s.blocker.signal(dbi, []string{key})
+	c.server.watches.touch(dbi, []string{key})
+	c.server.blocker.signal(dbi, []string{key})
 	c.W.WriteInt(1)
 }
 
@@ -429,14 +429,14 @@ func cmdCopy(c *Ctx) {
 	if dst.Idx != c.DB.Idx {
 		dst.Preserve(dstKey)
 	}
-	ne := c.s.ks.NewEntry(storage.CloneValue(e.Value))
+	ne := c.server.keyspace.NewEntry(storage.CloneValue(e.Value))
 	ne.ExpireAt = e.ExpireAt
 	dst.Set(dstKey, ne)
 	c.Dirty(1)
 	if dst.Idx != c.DB.Idx {
 		dst.Updated(dstKey)
-		c.s.watches.touch(dst.Idx, []string{dstKey})
-		c.s.blocker.signal(dst.Idx, []string{dstKey})
+		c.server.watches.touch(dst.Idx, []string{dstKey})
+		c.server.blocker.signal(dst.Idx, []string{dstKey})
 	}
 	c.W.WriteInt(1)
 }
@@ -574,7 +574,7 @@ func cmdObject(c *Ctx) {
 	}
 	switch sub {
 	case "encoding":
-		c.W.WriteBulkString(c.s.objectEncoding(e.Value))
+		c.W.WriteBulkString(c.server.objectEncoding(e.Value))
 	case "refcount":
 		if b, ok := e.Value.([]byte); ok {
 			if n, isInt := parseInt(b); isInt && n >= 0 && n < 10000 {
@@ -584,19 +584,19 @@ func cmdObject(c *Ctx) {
 		}
 		c.W.WriteInt(1)
 	case "idletime":
-		p := c.s.cfg.MaxMemoryPolicy.Load()
+		p := c.server.cfg.MaxMemoryPolicy.Load()
 		if p == config.PolicyAllKeysLFU || p == config.PolicyVolatileLFU {
 			c.Err("ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.")
 			return
 		}
-		c.W.WriteInt(int64(c.s.ks.Clock.Load() - e.LRU()))
+		c.W.WriteInt(int64(c.server.keyspace.Clock.Load() - e.LRU()))
 	case "freq":
-		p := c.s.cfg.MaxMemoryPolicy.Load()
+		p := c.server.cfg.MaxMemoryPolicy.Load()
 		if p != config.PolicyAllKeysLFU && p != config.PolicyVolatileLFU {
 			c.Err("ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.")
 			return
 		}
-		c.W.WriteInt(int64(c.s.ks.LFUCounter(e)))
+		c.W.WriteInt(int64(c.server.keyspace.LFUCounter(e)))
 	}
 }
 
@@ -679,10 +679,10 @@ func cmdRestore(c *Ctx) {
 		c.W.WriteOK()
 		return
 	}
-	e := c.s.ks.NewEntry(v)
+	e := c.server.keyspace.NewEntry(v)
 	e.ExpireAt = at
 	if idle >= 0 {
-		e.SetLRU(c.s.ks.Clock.Load() - uint32(idle))
+		e.SetLRU(c.server.keyspace.Clock.Load() - uint32(idle))
 	}
 	if freq >= 0 {
 		e.SetLFU(uint32(c.NowTime().Unix()/60)&65535<<8 | uint32(freq))
@@ -696,7 +696,7 @@ func cmdRestore(c *Ctx) {
 	c.W.WriteOK()
 }
 
-func cmdDBSize(c *Ctx) { c.W.WriteInt(c.s.ks.DBSize(c.DB.Idx)) }
+func cmdDBSize(c *Ctx) { c.W.WriteInt(c.server.keyspace.DBSize(c.DB.Idx)) }
 
 func parseFlushMode(c *Ctx, from int) bool {
 	if len(c.Args) > from+1 {
@@ -714,8 +714,8 @@ func cmdFlushDB(c *Ctx) {
 	if !parseFlushMode(c, 1) {
 		return
 	}
-	c.s.ks.FlushDB(c.DB.Idx)
-	c.s.watches.touchDB(c.DB.Idx)
+	c.server.keyspace.FlushDB(c.DB.Idx)
+	c.server.watches.touchDB(c.DB.Idx)
 	c.Dirty(1)
 	c.W.WriteOK()
 }
@@ -724,8 +724,8 @@ func cmdFlushAll(c *Ctx) {
 	if !parseFlushMode(c, 1) {
 		return
 	}
-	c.s.ks.FlushAll()
-	c.s.watches.touchDB(-1)
+	c.server.keyspace.FlushAll()
+	c.server.watches.touchDB(-1)
 	c.Dirty(1)
 	c.W.WriteOK()
 }
@@ -740,10 +740,10 @@ func cmdSwapDB(c *Ctx) {
 		return
 	}
 	if a != b {
-		c.s.ks.SwapDB(a, b)
-		c.s.watches.touchDB(a)
-		c.s.watches.touchDB(b)
-		c.s.blocker.signalAll()
+		c.server.keyspace.SwapDB(a, b)
+		c.server.watches.touchDB(a)
+		c.server.watches.touchDB(b)
+		c.server.blocker.signalAll()
 	}
 	c.Dirty(1)
 	c.W.WriteOK()
@@ -755,7 +755,7 @@ func (c *Ctx) parseDBIndexMsg(i int, msg string) (int, bool) {
 		c.Err(msg)
 		return 0, false
 	}
-	if n < 0 || n >= int64(c.s.ks.NumDB) {
+	if n < 0 || n >= int64(c.server.keyspace.NumDB) {
 		c.Err(errDBIndex)
 		return 0, false
 	}
@@ -768,15 +768,15 @@ func cmdSelect(c *Ctx) {
 		c.Err("ERR invalid DB index")
 		return
 	}
-	if n < 0 || n >= int64(c.s.ks.NumDB) {
+	if n < 0 || n >= int64(c.server.keyspace.NumDB) {
 		c.Err(errDBIndex)
 		return
 	}
 	if c.inScript {
 		c.scriptSelect(int(n))
-	} else if c.cl != nil {
-		c.cl.db = int(n)
-		c.cl.dbAtomic.Store(int32(n))
+	} else if c.client != nil {
+		c.client.db = int(n)
+		c.client.dbAtomic.Store(int32(n))
 	}
 	c.DB.Idx = int(n)
 	c.W.WriteOK()

@@ -148,7 +148,7 @@ func (s *Server) waitBlocked(c *Client, w *waiter, ctx *Ctx) int {
 	s.stats.totalBlocking.Add(1)
 	var timer <-chan time.Time
 	if ctx.blockTimeout > 0 {
-		remaining := ctx.blockTimeout - ctx.s.Now().UnixMilli()
+		remaining := ctx.blockTimeout - ctx.server.Now().UnixMilli()
 		if remaining <= 0 {
 			return blockTimeout
 		}
@@ -167,10 +167,10 @@ func (s *Server) waitBlocked(c *Client, w *waiter, ctx *Ctx) int {
 		// Detect client disconnects while blocked, so a disconnected client
 		// never pops data it can no longer receive.
 		defer close(peekDone)
-		if c.conn == nil || c.r.Buffered() > 0 { // in-process sessions have no socket or reader
+		if c.conn == nil || c.reader.Buffered() > 0 { // in-process sessions have no socket or reader
 			return
 		}
-		_, err := c.r.Underlying().Peek(1)
+		_, err := c.reader.Underlying().Peek(1)
 		if err != nil && !isTimeoutErr(err) {
 			close(closed)
 		}
@@ -377,7 +377,7 @@ func (l *slowlog) maybeAdd(s *Server, c *Client, args [][]byte, d time.Duration)
 
 func cmdSlowlog(c *Ctx) {
 	sub := strings.ToLower(c.Arg(1))
-	l := c.s.slowlog
+	l := c.server.slowlog
 	switch sub {
 	case "get":
 		if len(c.Args) > 3 {
