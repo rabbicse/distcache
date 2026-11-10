@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 DistCache is a Redis-compatible (targets Redis 8.4 command semantics and replies) in-memory server written in Go 1.27 for Linux and macOS (Windows deferred), with **no external dependencies** (stdlib only — including its own Lua 5.1 interpreter). The main difference from Redis is that commands execute concurrently across a sharded keyspace instead of on a single thread.
 
+Note: README.md is aspirational and out of date — the project structure, YAML config, Prometheus metrics and cluster/consistent-hashing sections do not reflect the code. Trust the code over the README.
+
 ## Commands
 
 ```sh
@@ -15,10 +17,7 @@ go test ./...                                    # run all tests
 go test ./internal/lua -run TestLuaBasics -v     # single test
 go run ./cmd/distcache-server --port 6380 --appendonly yes
 go run ./cmd/distcache-server /path/to/distcache.conf --maxmemory 2gb
-make build | test | test-e2e | test-all | lint | cover | bench | microbench | docker
 ```
-
-`test/e2e` is a separate Go module (it depends on go-redis so the server module stays stdlib-only); run it with `make test-e2e` or `cd test/e2e && go test ./...`. Differential tests compare against Redis 8.4 via `REDIS_SERVER_ADDR=host:port` (e.g. `docker run -p 6391:6379 redis:8.4`) or a `redis-server` on PATH. Known Redis divergences that are bugs live as skipped tests in `internal/server/redis84_divergence_test.go`.
 
 `cmd/server` is a backward-compat duplicate of `cmd/distcache-server` (kept for `go run cmd/server/main.go`); keep the two in sync. Configuration is redis.conf-style files and redis-server-style `--name value` args (plus legacy `-listenAddr host:port`), parsed in [internal/config/config.go](internal/config/config.go). Default port 6379, snapshot file `dump.dcs`, AOF `appendonly.aof`.
 
