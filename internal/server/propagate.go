@@ -22,8 +22,8 @@ import (
 // locks, so commands touching the same key are always logged in execution
 // order.
 type propagator struct {
-	s  *Server
-	mu sync.Mutex
+	server *Server
+	mu     sync.Mutex
 
 	lastDB int
 	offset int64 // master_repl_offset
@@ -44,7 +44,7 @@ type propagator struct {
 }
 
 func newPropagator(s *Server) *propagator {
-	return &propagator{s: s, lastDB: -1, replicas: map[*replicaConn]struct{}{},
+	return &propagator{server: s, lastDB: -1, replicas: map[*replicaConn]struct{}{},
 		aofSignal: make(chan struct{}, 1), writerDone: make(chan struct{})}
 }
 
@@ -126,7 +126,7 @@ func (p *propagator) feedLocked(buf []byte) {
 // ---- AOF ----
 
 func (p *propagator) aofPath() string {
-	return filepath.Join(p.s.cfg.Dir, p.s.cfg.AppendFilename)
+	return filepath.Join(p.server.cfg.Dir, p.server.cfg.AppendFilename)
 }
 
 func (p *propagator) openAOF() error {
@@ -150,7 +150,7 @@ func (p *propagator) openAOF() error {
 }
 
 func (p *propagator) writeAOF(buf []byte) {
-	if p.s.cfg.AppendFsync == "always" {
+	if p.server.cfg.AppendFsync == "always" {
 		if len(p.aofBuf) > 0 {
 			p.flushAOFLocked()
 		}
@@ -176,7 +176,7 @@ func (p *propagator) flushAOFLocked() {
 	p.aofSize += int64(n)
 	if err != nil {
 		p.aofErr = err
-		p.s.log.Warn("error writing to the AOF file", "err", err)
+		p.server.log.Warn("error writing to the AOF file", "err", err)
 	}
 	if cap(p.aofBuf) > 4<<20 {
 		p.aofBuf = nil
@@ -192,7 +192,7 @@ func (p *propagator) aofWriter() {
 	defer t.Stop()
 	for {
 		select {
-		case <-p.s.done:
+		case <-p.server.done:
 			return
 		case <-p.aofSignal:
 			p.mu.Lock()
@@ -202,7 +202,7 @@ func (p *propagator) aofWriter() {
 			p.mu.Lock()
 			p.flushAOFLocked()
 			f := p.aofFile
-			fsync := p.s.cfg.AppendFsync == "everysec"
+			fsync := p.server.cfg.AppendFsync == "everysec"
 			p.mu.Unlock()
 			if f != nil && fsync {
 				_ = f.Sync()
