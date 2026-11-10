@@ -117,16 +117,22 @@ func GeoLatDistance(lat1, lat2 float64) float64 {
 	return earthRadius * math.Abs(degRad(lat2)-degRad(lat1))
 }
 
-// GeoDistance computes the haversine distance in meters.
+// GeoDistance computes the haversine distance in meters like
+// geohashGetDistance. The rounding is pinned to what Redis's compiled code
+// does (on arm64 GCC contracts the longitude delta into a fused multiply-
+// subtract but not the latitude delta), so self-distances such as
+// GEORADIUSBYMEMBER ... STOREDIST give the same tiny residual as Redis on
+// every architecture instead of depending on Go's own FMA fusion.
 func GeoDistance(lon1, lat1, lon2, lat2 float64) float64 {
 	lon1r := degRad(lon1)
-	lon2r := degRad(lon2)
-	v := math.Sin((lon2r - lon1r) / 2)
+	v := math.Sin(math.FMA(lon2, math.Pi/180.0, -lon1r) / 2)
 	if v == 0 {
 		return GeoLatDistance(lat1, lat2)
 	}
-	lat1r := degRad(lat1)
-	lat2r := degRad(lat2)
+	// The explicit conversions stop Go from fusing the multiply into the
+	// subtraction.
+	lat1r := float64(degRad(lat1))
+	lat2r := float64(degRad(lat2))
 	u := math.Sin((lat2r - lat1r) / 2)
 	a := u*u + math.Cos(lat1r)*math.Cos(lat2r)*v*v
 	return 2.0 * earthRadius * math.Asin(math.Sqrt(a))

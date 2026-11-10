@@ -193,24 +193,6 @@ func unitFactor(u string) (float64, bool) {
 	return 0, false
 }
 
-func formatHuman(f float64) string {
-	s := strconv.FormatFloat(f, 'f', 17, 64)
-	s = strings.TrimRight(s, "0")
-	s = strings.TrimSuffix(s, ".")
-	if s == "-0" {
-		s = "0"
-	}
-	return s
-}
-
-func writeHumanDouble(w *resp.Writer, f float64) {
-	if w.Proto >= 3 {
-		w.WriteRaw([]byte("," + formatHuman(f) + "\r\n"))
-		return
-	}
-	w.WriteBulkString(formatHuman(f))
-}
-
 func writeDistance(w *resp.Writer, d float64) {
 	s := strconv.FormatFloat(d, 'f', 4, 64)
 	if w.Proto >= 3 {
@@ -323,8 +305,8 @@ func cmdGeoPos(c *Ctx) {
 		}
 		lon, lat := ds.GeoDecode(uint64(s))
 		c.W.WriteArrayLen(2)
-		writeHumanDouble(c.W, lon)
-		writeHumanDouble(c.W, lat)
+		c.W.WriteDouble(lon)
+		c.W.WriteDouble(lat)
 	}
 }
 
@@ -449,14 +431,23 @@ func (c *Ctx) parseGeoOpts(q *geoQuery, i int, storeAllowed bool) bool {
 			q.storeDist = true
 		case q.searchSyntax && c.Is(i, "frommember") && left >= 1:
 			q.fromMember = c.Arg(i + 1)
-			if q.hasMember || q.hasLonLat {
+			if q.hasLonLat {
+				// Redis rejects mixing the two origins as a syntax error.
+				c.SyntaxErr()
+				return false
+			}
+			if q.hasMember {
 				c.Err("ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for " + strings.ToUpper(c.Cmd.Name))
 				return false
 			}
 			q.hasMember = true
 			i++
 		case q.searchSyntax && c.Is(i, "fromlonlat") && left >= 2:
-			if q.hasMember || q.hasLonLat {
+			if q.hasMember {
+				c.SyntaxErr()
+				return false
+			}
+			if q.hasLonLat {
 				c.Err("ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for " + strings.ToUpper(c.Cmd.Name))
 				return false
 			}
@@ -536,7 +527,7 @@ func (c *Ctx) parseGeoOpts(q *geoQuery, i int, storeAllowed bool) bool {
 	}
 	if (q.hasStore || (q.searchSyntax && q.store != "")) && (q.withDist || q.withHash || q.withCoord) {
 		if q.searchSyntax {
-			c.Err("ERR WITHDIST, WITHHASH and WITHCOORD options are not compatible with GEOSEARCHSTORE")
+			c.Err("ERR GEOSEARCHSTORE is not compatible with WITHDIST, WITHHASH and WITHCOORD options")
 		} else {
 			c.Err("ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options")
 		}
@@ -641,8 +632,8 @@ func (c *Ctx) geoExecute(q *geoQuery, srcKey string) {
 		}
 		if q.withCoord {
 			c.W.WriteArrayLen(2)
-			writeHumanDouble(c.W, p.lon)
-			writeHumanDouble(c.W, p.lat)
+			c.W.WriteDouble(p.lon)
+			c.W.WriteDouble(p.lat)
 		}
 	}
 }
