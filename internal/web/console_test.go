@@ -403,3 +403,122 @@ func TestConsole_PageRendersSamplesAndScript(t *testing.T) {
 		t.Fatalf("console.js: status %d", g.Code)
 	}
 }
+
+func TestConsole_DeniedConnectionCommands(t *testing.T) {
+	e := newConsoleEnv(t)
+	for _, line := range []string{
+		"HELLO 2", "AUTH x", "client tracking on", "SYNC", "PSYNC ? -1", "REPLCONF listening-port 1",
+		"SHUTDOWN NOSAVE", "DEBUG SLEEP 0",
+	} {
+		t.Run(line, func(t *testing.T) {
+			out := e.exec(t, line)
+			if !strings.Contains(out, "not allowed") {
+				t.Fatalf("got %s, want refusal", out)
+			}
+		})
+	}
+	if out := e.exec(t, "SAVE"); strings.Contains(out, "not allowed") {
+		t.Fatalf("SAVE refused: %s", out)
+	}
+}
+
+func TestConsole_XReadGroupNamesDoNotBypassDenyList(t *testing.T) {
+	e := newConsoleEnv(t)
+	for _, line := range []string{
+		"XREADGROUP GROUP g block BLOCK 0 STREAMS s >",
+		"XREADGROUP GROUP streams c BLOCK 0 STREAMS s >",
+		"XREAD COUNT 1 BLOCK 0 STREAMS s $",
+	} {
+		if out := e.exec(t, line); !strings.Contains(out, "not allowed") {
+			t.Errorf("%q: got %s, want refusal", line, out)
+		}
+	}
+}
+
+func TestConsole_BlockingTimeoutCapped(t *testing.T) {
+	e := newConsoleEnv(t)
+	for _, line := range []string{
+		"BLPOP k 31", "BRPOP k 3600", "BLMPOP 1000 1 k LEFT", "XREAD BLOCK 30001 STREAMS s $",
+		"XREADGROUP GROUP g c BLOCK 99999 STREAMS s >",
+	} {
+		if out := e.exec(t, line); !strings.Contains(out, "30 seconds") {
+			t.Errorf("%q: got %s, want cap message", line, out)
+		}
+	}
+	for _, line := range []string{"BLPOP k 0.01", "XREAD BLOCK 10 STREAMS s $"} {
+		if out := e.exec(t, line); strings.Contains(out, "not allowed") {
+			t.Errorf("%q refused: %s", line, out)
+		}
+	}
+}
+
+func TestConsole_MultiExecAlignedAndIndicated(t *testing.T) {
+	e := newConsoleEnv(t)
+	e.exec(t, "MULTI")
+	out := e.exec(t, "SET a 1")
+	if !strings.Contains(out, "QUEUED") || !strings.Contains(out, "1 queued") {
+		t.Fatalf("SET in MULTI: %s", out)
+	}
+	out = e.exec(t, "INCR a")
+	if !strings.Contains(out, "2 queued") {
+		t.Fatalf("INCR in MULTI: %s", out)
+	}
+	if seed := e.post(t, "/console/seed", nil).Body.String(); !strings.Contains(seed, "transaction is open") {
+		t.Fatalf("seed in MULTI: %s", seed)
+	}
+	out = e.exec(t, "EXEC")
+	if strings.Count(out, "<li>") != 2 || !strings.Contains(out, ">OK<") || !strings.Contains(out, ">2<") {
+		t.Fatalf("EXEC reply misaligned: %s", out)
+	}
+	if strings.Contains(out, "transaction open") {
+		t.Fatalf("indicator still shown after EXEC: %s", out)
+	}
+	e.exec(t, "MULTI")
+	if out := e.exec(t, "DISCARD"); strings.Contains(out, "transaction open") {
+		t.Fatalf("indicator after DISCARD: %s", out)
+	}
+}
+
+func TestConsole_HistoryRedactsSecrets(t *testing.T) {
+	e := newConsoleEnv(t)
+	outs := []string{
+		e.exec(t, "AUTH hunter2"),
+		e.exec(t, "HELLO 3 AUTH default hunter2"),
+		e.exec(t, "CONFIG SET masterauth hunter2"),
+		e.exec(t, "config set maxmemory-policy noeviction requirepass hunter2"),
+	}
+	for _, o := range outs {
+		if strings.Contains(o, "hunter2") {
+			t.Errorf("secret rendered: %s", o)
+		}
+	}
+	for _, h := range e.s.historyCopy() {
+		if strings.Contains(h, "hunter2") {
+			t.Errorf("secret in history: %q", h)
+		}
+	}
+	if !strings.Contains(strings.Join(e.s.historyCopy(), "|"), "CONFIG SET ...(redacted)") {
+		t.Errorf("history lacks redacted entry: %q", e.s.historyCopy())
+	}
+}
+
+func TestConsole_DeniedLinesNotRecordedClientSide(t *testing.T) {
+	e := newConsoleEnv(t)
+	if out := e.exec(t, "PING"); !strings.Contains(out, `data-history="PING"`) {
+		t.Errorf("executed command lacks data-history: %s", out)
+	}
+	for _, line := range []string{"MONITOR", `get "x`} {
+		if out := e.exec(t, line); strings.Contains(out, "data-history") {
+			t.Errorf("%q marked for history: %s", line, out)
+		}
+	}
+}
+
+func TestConsole_AuditUnknownCommandName(t *testing.T) {
+	e := newConsoleEnv(t)
+	e.exec(t, "hunter2 more")
+	out := e.lb.String()
+	if strings.Contains(out, "hunter2") || !strings.Contains(out, "cmd=unknown") {
+		t.Fatalf("log: %q", out)
+	}
+}

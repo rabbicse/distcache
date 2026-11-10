@@ -230,3 +230,40 @@ func TestSession_ReadPush(t *testing.T) {
 		t.Fatal("expected timeout error with no pending push")
 	}
 }
+
+func TestExec_BlockOptionSkipsGroupNames(t *testing.T) {
+	s := newExecServer(t)
+	for _, args := range [][]string{
+		{"XREADGROUP", "GROUP", "g", "block", "BLOCK", "0", "STREAMS", "s", ">"},
+		{"XREADGROUP", "GROUP", "streams", "c", "BLOCK", "0", "STREAMS", "s", ">"},
+		{"XREAD", "COUNT", "1", "BLOCK", "0", "STREAMS", "s", "$"},
+	} {
+		if _, err := s.Exec(args...); !errors.Is(err, ErrWouldBlock) {
+			t.Errorf("%v: got %v, want ErrWouldBlock", args, err)
+		}
+	}
+}
+
+func TestServer_CommandKeyCount(t *testing.T) {
+	s := newExecServer(t)
+	for _, tc := range []struct {
+		args []string
+		want int
+	}{
+		{[]string{"SET", "a", "b"}, 1},
+		{[]string{"MSET", "a", "1", "b", "2"}, 2},
+		{[]string{"PING"}, 0},
+		{[]string{"nosuch", "x"}, 0},
+		{[]string{"GET"}, 0},
+	} {
+		if got := s.CommandKeyCount(tc.args); got != tc.want {
+			t.Errorf("%v: got %d, want %d", tc.args, got, tc.want)
+		}
+	}
+	if got := s.CommandName("sEt"); got != "set" && got != "SET" {
+		t.Errorf("CommandName: got %q", got)
+	}
+	if got := s.CommandName("hunter2"); got != "" {
+		t.Errorf("CommandName unknown: got %q", got)
+	}
+}

@@ -79,3 +79,4 @@ ol.reply { padding-left: 2rem; }
 .console-samples li { display: grid; gap: 2px; font-size: 0.85rem; }
 .console-samples button.sample { text-align: left; padding: 4px 8px; background: var(--surface); color: var(--text); border: 1px solid var(--border); font-weight: 400; overflow-wrap: anywhere; }
 .console-samples .seed { width: 100%; margin-bottom: 12px; }
+.multi-open { margin-top: 4px; color: #fcd34d; font-size: 0.85rem; }

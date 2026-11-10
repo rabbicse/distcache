@@ -86,6 +86,8 @@ type session struct {
 	db *server.Session // nil when the console has no server (tests)
 
 	history []string // console history, newest first; guarded by mu
+	inMulti bool     // an open MULTI on db; guarded by mu
+	queued  int      // commands queued in that MULTI; guarded by mu
 }
 
 // lockout tracks login failures from one client IP.

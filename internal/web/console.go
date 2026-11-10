@@ -29,57 +29,83 @@ const (
 // refuses it. Blocking commands appear here too but are refused only when
 // their timeout is zero (see zeroTimeout).
 var deniedCommands = map[string]string{
-	"SUBSCRIBE":    "subscriptions need a long-lived connection; use the Pub/Sub page",
-	"PSUBSCRIBE":   "subscriptions need a long-lived connection; use the Pub/Sub page",
-	"SSUBSCRIBE":   "subscriptions need a long-lived connection; use the Pub/Sub page",
-	"MONITOR":      "MONITOR streams every command and cannot run in the console",
-	"QUIT":         "the console session is managed by the browser; use Logout",
-	"RESET":        "RESET would discard the console session state",
-	"CLIENT REPLY": "turning replies off would silence the console",
-	"BLPOP":        "blocks forever with a zero timeout; use a non-zero timeout",
-	"BRPOP":        "blocks forever with a zero timeout; use a non-zero timeout",
-	"BLMOVE":       "blocks forever with a zero timeout; use a non-zero timeout",
-	"BRPOPLPUSH":   "blocks forever with a zero timeout; use a non-zero timeout",
-	"BZPOPMIN":     "blocks forever with a zero timeout; use a non-zero timeout",
-	"BZPOPMAX":     "blocks forever with a zero timeout; use a non-zero timeout",
-	"BLMPOP":       "blocks forever with a zero timeout; use a non-zero timeout",
-	"BZMPOP":       "blocks forever with a zero timeout; use a non-zero timeout",
-	"XREAD":        "BLOCK 0 waits forever; use a non-zero BLOCK time",
-	"XREADGROUP":   "BLOCK 0 waits forever; use a non-zero BLOCK time",
+	"SUBSCRIBE":       "subscriptions need a long-lived connection; use the Pub/Sub page",
+	"PSUBSCRIBE":      "subscriptions need a long-lived connection; use the Pub/Sub page",
+	"SSUBSCRIBE":      "subscriptions need a long-lived connection; use the Pub/Sub page",
+	"MONITOR":         "MONITOR streams every command and cannot run in the console",
+	"QUIT":            "the console session is managed by the browser; use Logout",
+	"RESET":           "RESET would discard the console session state",
+	"CLIENT REPLY":    "turning replies off would silence the console",
+	"CLIENT TRACKING": "tracking pushes invalidation frames that would misalign replies",
+	"HELLO":           "the console manages its own protocol and user; use Logout to change user",
+	"AUTH":            "the console session is authenticated by the web login",
+	"SYNC":            "replication handshakes need a dedicated connection",
+	"PSYNC":           "replication handshakes need a dedicated connection",
+	"REPLCONF":        "replication handshakes need a dedicated connection",
+	"SHUTDOWN":        "stopping the server from the console is disabled",
+	"DEBUG":           "DEBUG can crash or stall the server and is disabled in the console",
+	"BLPOP":           "blocks forever with a zero timeout; use a non-zero timeout",
+	"BRPOP":           "blocks forever with a zero timeout; use a non-zero timeout",
+	"BLMOVE":          "blocks forever with a zero timeout; use a non-zero timeout",
+	"BRPOPLPUSH":      "blocks forever with a zero timeout; use a non-zero timeout",
+	"BZPOPMIN":        "blocks forever with a zero timeout; use a non-zero timeout",
+	"BZPOPMAX":        "blocks forever with a zero timeout; use a non-zero timeout",
+	"BLMPOP":          "blocks forever with a zero timeout; use a non-zero timeout",
+	"BZMPOP":          "blocks forever with a zero timeout; use a non-zero timeout",
+	"XREAD":           "BLOCK 0 waits forever; use a non-zero BLOCK time",
+	"XREADGROUP":      "BLOCK 0 waits forever; use a non-zero BLOCK time",
 }
 
-// zeroTimeout reports, per blocking command, whether args block forever.
-var zeroTimeout = map[string]func(args []string) bool{
-	"BLPOP":      lastArgZero,
-	"BRPOP":      lastArgZero,
-	"BLMOVE":     lastArgZero,
-	"BRPOPLPUSH": lastArgZero,
-	"BZPOPMIN":   lastArgZero,
-	"BZPOPMAX":   lastArgZero,
-	"BLMPOP":     func(a []string) bool { return len(a) > 1 && isZero(a[1]) },
-	"BZMPOP":     func(a []string) bool { return len(a) > 1 && isZero(a[1]) },
-	"XREAD":      blockZero,
-	"XREADGROUP": blockZero,
+// maxBlockSeconds caps blocking timeouts: the session lock is held for the
+// whole wait, so a long block would freeze the browser session.
+const maxBlockSeconds = 30
+
+// timeoutSeconds extracts, per blocking command, the wait in seconds.
+var timeoutSeconds = map[string]func(args []string) (float64, bool){
+	"BLPOP":      lastArgSecs,
+	"BRPOP":      lastArgSecs,
+	"BLMOVE":     lastArgSecs,
+	"BRPOPLPUSH": lastArgSecs,
+	"BZPOPMIN":   lastArgSecs,
+	"BZPOPMAX":   lastArgSecs,
+	"BLMPOP":     func(a []string) (float64, bool) { return secs(a, 1, 1) },
+	"BZMPOP":     func(a []string) (float64, bool) { return secs(a, 1, 1) },
+	"XREAD":      blockSecs,
+	"XREADGROUP": blockSecs,
 }
 
-func isZero(s string) bool {
-	f, err := strconv.ParseFloat(s, 64)
-	return err == nil && f == 0
+func secs(a []string, i int, perUnit float64) (float64, bool) {
+	if i >= len(a) {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(a[i], 64)
+	if err != nil {
+		return 0, false
+	}
+	return f / perUnit, true
 }
 
-func lastArgZero(a []string) bool { return len(a) > 1 && isZero(a[len(a)-1]) }
+func lastArgSecs(a []string) (float64, bool) { return secs(a, len(a)-1, 1) }
 
-// blockZero finds BLOCK <ms> ahead of STREAMS and reports whether ms is zero.
-func blockZero(a []string) bool {
-	for i := 1; i+1 < len(a); i++ {
+// blockSecs finds BLOCK <ms> among the XREAD/XREADGROUP options. Option
+// values (COUNT n, GROUP group consumer) are skipped so names equal to BLOCK
+// or STREAMS are not misread; the options end at STREAMS.
+func blockSecs(a []string) (float64, bool) {
+	for i := 1; i < len(a); {
 		switch strings.ToUpper(a[i]) {
 		case "STREAMS":
-			return false
+			return 0, false
 		case "BLOCK":
-			return isZero(a[i+1])
+			return secs(a, i+1, 1000)
+		case "GROUP":
+			i += 3
+		case "COUNT":
+			i += 2
+		default:
+			i++
 		}
 	}
-	return false
+	return 0, false
 }
 
 // denyReason reports why the console refuses args, if it does.
@@ -95,10 +121,20 @@ func denyReason(args []string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if zero, blocking := zeroTimeout[name]; blocking && !zero(args) {
-		return "", false
+	extract, blocking := timeoutSeconds[name]
+	if !blocking {
+		return reason, true
 	}
-	return reason, true
+	t, known := extract(args)
+	switch {
+	case !known:
+		return "", false // malformed; the handler rejects it
+	case t == 0:
+		return reason, true
+	case t > maxBlockSeconds:
+		return fmt.Sprintf("a wait over %d seconds would freeze the console session", maxBlockSeconds), true
+	}
+	return "", false
 }
 
 // parseCommandLine splits line with redis-cli quoting: double quotes allow
@@ -192,6 +228,12 @@ func isHex(b byte) bool {
 type replyEntry struct {
 	Cmd   string
 	Reply replyView
+	// Hist is the (redacted) line recorded in history, empty when the line
+	// was not recorded; console.js mirrors it into its client-side history.
+	Hist string
+	// InMulti and Queued describe an open transaction on the session.
+	InMulti bool
+	Queued  int
 }
 
 func errorEntry(cmd, msg string) replyEntry {
@@ -199,7 +241,11 @@ func errorEntry(cmd, msg string) replyEntry {
 }
 
 // writeEntry renders one reply fragment.
-func (c *Console) writeEntry(w http.ResponseWriter, e replyEntry) {
+// It annotates the entry with the session's transaction state.
+func (c *Console) writeEntry(w http.ResponseWriter, s *session, e replyEntry) {
+	s.mu.Lock()
+	e.InMulti, e.Queued = s.inMulti, s.queued
+	s.mu.Unlock()
 	c.renderFragment(w, "reply", e)
 }
 
@@ -208,7 +254,7 @@ func (c *Console) handleExec(w http.ResponseWriter, r *http.Request) {
 	s := sessionOf(r)
 	r.Body = http.MaxBytesReader(w, r.Body, maxCommandBytes)
 	if err := r.ParseForm(); err != nil {
-		c.writeEntry(w, errorEntry("", "command too large"))
+		c.writeEntry(w, s, errorEntry("", "command too large"))
 		return
 	}
 	line := strings.TrimSpace(r.PostFormValue("cmd"))
@@ -217,53 +263,87 @@ func (c *Console) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	args, err := parseCommandLine(line)
 	if err != nil {
-		c.writeEntry(w, errorEntry(line, "parse error: "+err.Error()))
+		c.writeEntry(w, s, errorEntry(line, "parse error: "+err.Error()))
 		return
 	}
 	if len(args) == 0 {
 		return
 	}
+	shown := redactLine(args, line)
 	if reason, bad := denyReason(args); bad {
-		c.writeEntry(w, errorEntry(line, fmt.Sprintf("%s is not allowed in the console: %s", strings.ToUpper(args[0]), reason)))
+		c.writeEntry(w, s, errorEntry(shown, fmt.Sprintf("%s is not allowed in the console: %s", strings.ToUpper(args[0]), reason)))
 		return
 	}
 	if s.db == nil {
-		c.writeEntry(w, errorEntry(line, "console has no server attached"))
+		c.writeEntry(w, s, errorEntry(shown, "console has no server attached"))
 		return
 	}
+	keys := c.srv.CommandKeyCount(args)
 	s.mu.Lock()
-	keys := commandKeyCount(s.db, args)
 	v, err := s.db.Exec(args...)
-	s.pushHistory(line)
+	s.pushHistory(shown)
+	s.trackMulti(args[0], v, err)
 	s.mu.Unlock()
 	c.auditCommand(r, s, args[0], keys)
 	switch {
 	case errors.Is(err, server.ErrWouldBlock):
-		c.writeEntry(w, errorEntry(line, "command is not allowed in the console: it would block forever"))
+		c.writeEntry(w, s, errorEntry(shown, "command is not allowed in the console: it would block forever"))
 	case err != nil:
 		c.log.Warn("web cmd exec", "err", err)
-		c.writeEntry(w, errorEntry(line, "internal error running the command"))
+		c.writeEntry(w, s, errorEntry(shown, "internal error running the command"))
 	default:
-		c.writeEntry(w, replyEntry{Cmd: line, Reply: viewOf(v)})
+		c.writeEntry(w, s, replyEntry{Cmd: shown, Reply: viewOf(v), Hist: shown})
 	}
 }
 
-// commandKeyCount returns how many keys args touches according to the
-// server's own key specs, or 0 when unknown. The caller holds the session
-// lock.
-func commandKeyCount(db *server.Session, args []string) int {
-	v, err := db.Exec(append([]string{"COMMAND", "GETKEYS"}, args...)...)
-	if err != nil || v.Type != '*' {
-		return 0
+// redactLine returns line as shown and stored: commands that carry
+// credentials keep only their name.
+func redactLine(args []string, line string) string {
+	name := strings.ToUpper(args[0])
+	switch name {
+	case "AUTH", "HELLO":
+		return name + " ...(redacted)"
+	case "CONFIG":
+		if len(args) > 2 && strings.EqualFold(args[1], "SET") {
+			for _, k := range args[2:] {
+				switch strings.ToLower(k) {
+				case "requirepass", "masterauth", "masteruser":
+					return "CONFIG SET ...(redacted)"
+				}
+			}
+		}
 	}
-	return len(v.Elems)
+	return line
+}
+
+// trackMulti follows the session's transaction from the replies. The caller
+// holds s.mu.
+func (s *session) trackMulti(name string, v resp.Value, err error) {
+	if err != nil {
+		return
+	}
+	switch strings.ToUpper(name) {
+	case "MULTI":
+		if v.Type != '-' {
+			s.inMulti, s.queued = true, 0
+		}
+	case "EXEC", "DISCARD":
+		if s.inMulti {
+			s.inMulti, s.queued = false, 0
+		}
+	default:
+		if s.inMulti && v.Type == '+' && string(v.Str) == "QUEUED" {
+			s.queued++
+		}
+	}
 }
 
 // auditCommand logs the command name and key count, never the arguments.
 func (c *Console) auditCommand(r *http.Request, s *session, name string, keys int) {
-	name = strings.ToUpper(name)
-	if len(name) > maxAuditString {
-		name = name[:maxAuditString]
+	if canon := c.srv.CommandName(name); canon != "" {
+		name = strings.ToUpper(canon)
+	} else if !strings.HasPrefix(name, "SAMPLE-") {
+		name = "unknown" // never log arbitrary first tokens such as pasted secrets
 	}
 	c.log.Info("web cmd", "user", s.user, "ip", clientIP(r, c.trusted).String(), "cmd", name, "keys", keys)
 }
@@ -293,22 +373,28 @@ func (c *Console) handleConsolePage(w http.ResponseWriter, r *http.Request) {
 	c.render(w, http.StatusOK, "layout.html", p)
 }
 
-// handleSeed creates the sample keys, refusing when any sample:* key exists.
+// handleSeed creates the sample keys, refusing when any sample:* key exists
+// or a transaction is open (the seed would be queued, not run).
 func (c *Console) handleSeed(w http.ResponseWriter, r *http.Request) {
 	const label = "Load sample data"
 	s := sessionOf(r)
 	if s.db == nil {
-		c.writeEntry(w, errorEntry(label, "console has no server attached"))
+		c.writeEntry(w, s, errorEntry(label, "console has no server attached"))
 		return
 	}
 	s.mu.Lock()
-	entry := seedSamples(s.db)
+	var entry replyEntry
+	if s.inMulti {
+		entry = errorEntry("", "a transaction is open on this session; run EXEC or DISCARD before loading sample data")
+	} else {
+		entry = seedSamples(s.db)
+	}
 	s.mu.Unlock()
 	if entry.Reply.Kind != "error" {
 		c.auditCommand(r, s, "SAMPLE-SEED", len(seedScript))
 	}
 	entry.Cmd = label
-	c.writeEntry(w, entry)
+	c.writeEntry(w, s, entry)
 }
 
 // seedSamples runs the seed script on db, whose lock the caller holds.

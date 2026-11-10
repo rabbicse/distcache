@@ -71,12 +71,9 @@
     }
   });
 
-  // Record the command and reset the line once the server has answered.
+  // Reset the line once the server has answered.
   document.body.addEventListener("htmx:afterRequest", function (e) {
     if (e.detail.elt === form && e.detail.successful) {
-      var v = input.value.trim();
-      if (v) history.unshift(v);
-      if (history.length > 100) history.length = 100;
       pos = -1;
       draft = "";
       input.value = "";
@@ -85,6 +82,14 @@
   });
 
   document.body.addEventListener("htmx:afterSwap", function (e) {
-    if (e.detail.target === output) output.scrollTop = output.scrollHeight;
+    if (e.detail.target !== output) return;
+    // Mirror the server's history: only lines it recorded (and redacted).
+    var last = output.lastElementChild;
+    var rec = last && last.getAttribute("data-history");
+    if (rec && e.detail.elt === form) {
+      history.unshift(rec);
+      if (history.length > 100) history.length = 100;
+    }
+    output.scrollTop = output.scrollHeight;
   });
 })();
