@@ -96,7 +96,7 @@ func certificateFor(cfg *config.Config, dir string, log *slog.Logger) (tls.Certi
 		}
 		return cert, nil
 	}
-	cert, err := loadOrCreateSelfSigned(dir, selfSignedHosts(cfg), time.Now())
+	cert, err := loadOrCreateSelfSignedLog(dir, selfSignedHosts(cfg), time.Now(), log)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
@@ -145,13 +145,41 @@ func splitSANs(hosts []string) (dns []string, ips []net.IP) {
 // dir, creating it when missing, expiring within certRenewBefore of now, or no
 // longer covering hosts.
 func loadOrCreateSelfSigned(dir string, hosts []string, now time.Time) (tls.Certificate, error) {
+	return loadOrCreateSelfSignedLog(dir, hosts, now, slog.New(slog.DiscardHandler))
+}
+
+// loadOrCreateSelfSignedLog is loadOrCreateSelfSigned with a logger for the
+// permission fix-up and regeneration notices.
+func loadOrCreateSelfSignedLog(dir string, hosts []string, now time.Time, log *slog.Logger) (tls.Certificate, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return tls.Certificate{}, fmt.Errorf("create web tls dir %s: %w", dir, err)
+	}
 	certPath, keyPath := filepath.Join(dir, certFile), filepath.Join(dir, keyFile)
-	if cert, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
-		if leaf, perr := x509.ParseCertificate(cert.Certificate[0]); perr == nil && certUsable(leaf, hosts, now) {
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	switch {
+	case err == nil:
+		leaf, perr := x509.ParseCertificate(cert.Certificate[0])
+		if perr == nil && certUsable(leaf, hosts, now) {
+			tightenKeyMode(keyPath, log)
 			return cert, nil
 		}
+	case !errors.Is(err, os.ErrNotExist):
+		log.Info("web tls regenerating unreadable or mismatched certificate pair", "dir", dir, "err", err)
 	}
 	return createSelfSigned(certPath, keyPath, hosts, now)
+}
+
+// tightenKeyMode restores 0600 on a reused key file an operator loosened.
+func tightenKeyMode(keyPath string, log *slog.Logger) {
+	st, err := os.Stat(keyPath)
+	if err != nil || st.Mode().Perm()&0o077 == 0 {
+		return
+	}
+	if err := os.Chmod(keyPath, 0o600); err != nil {
+		log.Warn("web tls key file is accessible to others and could not be tightened", "path", keyPath, "err", err)
+		return
+	}
+	log.Warn("web tls key file had loose permissions; reset to 0600", "path", keyPath, "mode", st.Mode().Perm().String())
 }
 
 // certUsable reports whether leaf is far enough from expiry and covers hosts.
@@ -181,7 +209,7 @@ func createSelfSigned(certPath, keyPath string, hosts []string, now time.Time) (
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("generate key: %w", err)
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("serial: %w", err)
 	}

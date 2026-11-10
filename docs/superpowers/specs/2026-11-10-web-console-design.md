@@ -148,7 +148,7 @@ flowchart LR
   - Regenerated 30 days before expiry.
   - The SHA-256 fingerprint is logged at startup.
 - **Insecure mode**
-  - `web-insecure yes` logs a warning every 10 minutes and shows a red banner in the UI.
+  - `web-insecure yes` logs a warning at startup and every 10 minutes, and shows a red banner in the UI, only when plain HTTP is actually served on a non-loopback bind (`web-tls off`). With TLS active or on loopback the flag is inert and nothing is shown.
 - **TLS settings**
   - Minimum TLS 1.2, with Go's default cipher suites.
 

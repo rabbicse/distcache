@@ -269,3 +269,86 @@ func TestTLS_InsecureWarnsPeriodically(t *testing.T) {
 		t.Error("banner rendered on a secure console")
 	}
 }
+
+func TestTLS_SerialIs128BitCapable(t *testing.T) {
+	// A 128-bit random serial exceeds 127 bits about half the time; 40 draws
+	// make a false failure vanishingly unlikely.
+	for range 40 {
+		dir := t.TempDir()
+		c, err := loadOrCreateSelfSigned(dir, nil, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		leaf, _ := x509.ParseCertificate(c.Certificate[0])
+		if leaf.SerialNumber.BitLen() == 128 {
+			return
+		}
+	}
+	t.Error("no serial reached 128 bits in 40 draws")
+}
+
+func TestTLS_ReuseTightensKeyMode(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	if _, err := loadOrCreateSelfSigned(dir, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "web-key.pem")
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	log, lb := newBufLogger()
+	if _, err := loadOrCreateSelfSignedLog(dir, nil, now, log); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(keyPath)
+	if st.Mode().Perm() != 0o600 {
+		t.Errorf("got mode %o, want 600", st.Mode().Perm())
+	}
+	if !strings.Contains(lb.String(), "loose permissions") {
+		t.Errorf("missing warning; log: %s", lb.String())
+	}
+}
+
+func TestTLS_CorruptPairRegeneratedWithLog(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	if _, err := loadOrCreateSelfSigned(dir, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "web-cert.pem"), []byte("junk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	log, lb := newBufLogger()
+	if _, err := loadOrCreateSelfSignedLog(dir, nil, now, log); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(lb.String(), "regenerating") || !strings.Contains(lb.String(), "level=INFO") {
+		t.Errorf("missing info log; log: %s", lb.String())
+	}
+	if _, err := tls.LoadX509KeyPair(filepath.Join(dir, "web-cert.pem"), filepath.Join(dir, "web-key.pem")); err != nil {
+		t.Errorf("regenerated pair does not load: %v", err)
+	}
+}
+
+func TestTLS_CreatesMissingDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "a", "b")
+	if _, err := loadOrCreateSelfSigned(dir, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(dir)
+	if err != nil || !st.IsDir() {
+		t.Fatalf("dir not created: %v", err)
+	}
+}
+
+func TestTLS_DirErrorNamesPath(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadOrCreateSelfSigned(filepath.Join(file, "sub"), nil, time.Now())
+	if err == nil || !strings.Contains(err.Error(), file) {
+		t.Fatalf("got err %v, want one naming %s", err, file)
+	}
+}
