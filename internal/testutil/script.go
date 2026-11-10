@@ -1,3 +1,5 @@
+// Scripted command steps with expected rendered replies, plus command coverage tracking.
+
 package testutil
 
 import (

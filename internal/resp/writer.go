@@ -1,3 +1,5 @@
+// RESP2/RESP3 reply encoder with buffered, mutex-guarded flushing.
+
 package resp
 
 import (

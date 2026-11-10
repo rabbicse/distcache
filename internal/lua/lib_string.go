@@ -1,3 +1,5 @@
+// Lua string library, including the Lua 5.1 pattern matcher.
+
 package lua
 
 import (

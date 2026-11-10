@@ -1,3 +1,5 @@
+// HyperLogLog encoding, insertion, counting and merging compatible with Redis.
+
 package ds
 
 import (

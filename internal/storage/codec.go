@@ -1,3 +1,5 @@
+// DCSNAP binary encoding of entries for snapshots, full sync and DUMP/RESTORE.
+
 package storage
 
 import (

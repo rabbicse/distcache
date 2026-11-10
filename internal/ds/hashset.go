@@ -1,3 +1,5 @@
+// Hash (with per-field expiry) and Set value types.
+
 package ds
 
 // HashFieldOverhead and SetMemberOverhead are estimated per-entry overheads.

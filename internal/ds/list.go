@@ -1,3 +1,5 @@
+// List value type: a growable ring buffer of byte slices.
+
 package ds
 
 // List is a double-ended queue backed by a growable ring buffer. Push/pop at

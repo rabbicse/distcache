@@ -1,15 +1,21 @@
+// Geohash helpers ported from Redis geohash.c / geohash_helper.c so GEO
+// commands produce identical scores, positions and distances.
+
 package ds
 
 import "math"
 
-// Geohash helpers ported from Redis geohash.c / geohash_helper.c so GEO
-// commands produce identical scores, positions and distances.
-
+// Geohash coordinate limits and precision, matching Redis geohash.h.
 const (
-	GeoStepMax  = 26
-	GeoLatMin   = -85.05112878
-	GeoLatMax   = 85.05112878
-	GeoLongMin  = -180.0
+	// GeoStepMax is the number of geohash steps per coordinate (52-bit scores).
+	GeoStepMax = 26
+	// GeoLatMin is the minimum latitude representable by a geohash (EPSG:900913 limit).
+	GeoLatMin = -85.05112878
+	// GeoLatMax is the maximum latitude representable by a geohash.
+	GeoLatMax = 85.05112878
+	// GeoLongMin is the minimum longitude.
+	GeoLongMin = -180.0
+	// GeoLongMax is the maximum longitude.
 	GeoLongMax  = 180.0
 	earthRadius = 6372797.560856
 )

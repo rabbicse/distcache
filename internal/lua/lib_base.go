@@ -1,3 +1,5 @@
+// Lua base library (print, type, pairs, pcall, tonumber ...) and argument checkers.
+
 package lua
 
 import (

@@ -1,3 +1,5 @@
+// Entry point for distcache-bench: flag parsing and wiring to the runner.
+
 package main
 
 import (

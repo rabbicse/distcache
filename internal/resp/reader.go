@@ -20,6 +20,7 @@ import (
 // like Redis does.
 type ProtocolError struct{ Msg string }
 
+// Error returns the message without the "ERR " prefix, which the server adds.
 func (e *ProtocolError) Error() string { return "Protocol error: " + e.Msg }
 
 // Limits mirror Redis defaults (proto-max-bulk-len, multibulk length).
