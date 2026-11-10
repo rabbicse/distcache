@@ -118,23 +118,28 @@ func GeoLatDistance(lat1, lat2 float64) float64 {
 }
 
 // GeoDistance computes the haversine distance in meters like
-// geohashGetDistance. The rounding is pinned to what Redis's compiled code
-// does (on arm64 GCC contracts the longitude delta into a fused multiply-
-// subtract but not the latitude delta), so self-distances such as
-// GEORADIUSBYMEMBER ... STOREDIST give the same tiny residual as Redis on
-// every architecture instead of depending on Go's own FMA fusion.
+// geohashGetDistance, with its rounding pinned so every DistCache build
+// (amd64, arm64, ...) gives the same bits regardless of Go's own FMA fusion.
+//
+// The longitude delta is an explicit fused multiply-subtract and the
+// latitude delta is not fused. This is what GCC emits for Redis on arm64 and
+// is what the Redis 8.4 expectations were captured from: a self-distance
+// such as GEORADIUSBYMEMBER ... STOREDIST is 4.313314116504969e-14 km there.
+// A Redis built for x86-64 (no FMA contraction) replies 0 for that case
+// instead. The final sum is not fused, as on x86-64 and as GCC arm64 leaves
+// it when one term is zero.
 func GeoDistance(lon1, lat1, lon2, lat2 float64) float64 {
 	lon1r := degRad(lon1)
 	v := math.Sin(math.FMA(lon2, math.Pi/180.0, -lon1r) / 2)
 	if v == 0 {
 		return GeoLatDistance(lat1, lat2)
 	}
-	// The explicit conversions stop Go from fusing the multiply into the
-	// subtraction.
+	// The float64 conversions are fusion barriers (Go spec, floating-point
+	// operators): they force each product to be rounded on its own.
 	lat1r := float64(degRad(lat1))
 	lat2r := float64(degRad(lat2))
 	u := math.Sin((lat2r - lat1r) / 2)
-	a := u*u + math.Cos(lat1r)*math.Cos(lat2r)*v*v
+	a := float64(u*u) + float64(float64(math.Cos(lat1r)*math.Cos(lat2r))*v*v)
 	return 2.0 * earthRadius * math.Asin(math.Sqrt(a))
 }
 

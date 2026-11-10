@@ -38,6 +38,9 @@ var redis84Divergences = []divergence{
 		testutil.S(`*[*["Catania", "56.4413", `+cataniaPos+`], *["Palermo", "190.4424", `+palermoPos+`]]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYBOX", "400", "400", "km", "ASC", "WITHCOORD", "WITHDIST"),
 		testutil.S(`*[*["Catania", `+cataniaPos+`]]`, "GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "COUNT", "1", "WITHCOORD"),
 	)},
+	// Captured from Redis on arm64, where GCC fuses the longitude delta in
+	// geohashGetDistance; an x86-64 Redis build replies "0" here. DistCache
+	// pins the arm64 rounding on every architecture (ds.GeoDistance).
 	{"GeoStoreDistSelfDistance", "known bug B20: STOREDIST self-distance is 8.08e-14, Redis computes 4.31e-14 (haversine operand order)", fixed(
 		testutil.S(":1", "GEOADD", "g", palermoLon, palermoLat, "Palermo"),
 		testutil.S(":1", "GEORADIUSBYMEMBER", "g", "Palermo", "10", "km", "STOREDIST", "dst3"),
