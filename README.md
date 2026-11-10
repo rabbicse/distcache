@@ -149,4 +149,4 @@ Seven sub-projects, described in [the roadmap spec](docs/superpowers/specs/2026-
 
 ## License
 
-GNU GPL v3, see [LICENSE](LICENSE).
+Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
