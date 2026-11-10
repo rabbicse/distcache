@@ -6,20 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 DistCache is a Redis-compatible (targets Redis 8.4 command semantics and replies) in-memory server written in Go 1.27 for Linux and macOS (Windows deferred), with **no external dependencies** (stdlib only — including its own Lua 5.1 interpreter). The main difference from Redis is that commands execute concurrently across a sharded keyspace instead of on a single thread.
 
-Note: README.md is aspirational and out of date — the project structure, YAML config, Prometheus metrics and cluster/consistent-hashing sections do not reflect the code. Trust the code over the README.
-
 ## Commands
 
 ```sh
 go build ./...                                   # build everything
 go vet ./...
 go test ./...                                    # run all tests
+make build | test | test-e2e | test-all | lint | cover | bench | microbench | docker
 go test ./internal/lua -run TestLuaBasics -v     # single test
 go run ./cmd/distcache-server --port 6380 --appendonly yes
 go run ./cmd/distcache-server /path/to/distcache.conf --maxmemory 2gb
 ```
 
 Layout follows Go convention (no `src/`): binaries in `cmd/`, all core code in `internal/`, end-to-end tests in `test/e2e` (own module), client examples in `examples/<lang>` (each its own project), React console in `web/console` (planned), Docker files in `deploy/docker`, scripts in `scripts/`. Configuration is redis.conf-style files and redis-server-style `--name value` args (plus legacy `-listenAddr host:port`), parsed in [internal/config/config.go](internal/config/config.go). Default port 6379, snapshot file `dump.dcs`, AOF `appendonly.aof`.
+
+`test/e2e` is a separate Go module (it depends on go-redis; the server stays stdlib-only), so `go test ./...` at the root skips it — run it with `make test-e2e`.
 
 Integration tests should use [internal/testutil](internal/testutil/client.go): `StartServer(t, mutate)` boots an in-process server on a random port with a temp dir; `StartRedis(t)` starts a real `redis-server` (if on PATH, unless `DISTCACHE_SKIP_REDIS` is set) for side-by-side reply comparison via `Render`/`DoS`.
 
