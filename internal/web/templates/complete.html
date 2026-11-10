@@ -1,0 +1,1 @@
+{{define "complete"}}{{if .Hint}}<div class="hint-line" data-hint="{{.Hint}}"><strong class="mono">{{.Exact}}</strong> {{.Hint}}</div>{{end}}{{if .Matches}}<ul class="suggest">{{range .Matches}}<li><button type="button" class="mono" data-cmd="{{.Name}}">{{.Name}}</button></li>{{end}}</ul>{{end}}{{end}}

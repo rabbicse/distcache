@@ -51,3 +51,31 @@ button { padding: 9px 14px; border: 0; border-radius: 6px; background: var(--acc
 .nav-form button { padding: 6px 12px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: inherit; cursor: pointer; }
 .nav-form button:hover { color: var(--text); }
 .form-error { color: var(--danger, #c0392b); }
+
+/* Console */
+.console { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 52rem) { .console { grid-template-columns: minmax(0, 1fr); } }
+.console-output { min-height: 16rem; max-height: 60vh; overflow: auto; padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.console-form { display: flex; gap: 8px; margin-top: 10px; }
+.console-form input { flex: 1; min-width: 0; }
+.console-hint { min-height: 1.5rem; margin-top: 6px; font-size: 0.9rem; }
+.console-hint .suggest { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; padding: 0; list-style: none; }
+.console-hint .suggest button { padding: 2px 8px; background: var(--surface); color: var(--text); border: 1px solid var(--border); font-weight: 400; }
+.entry { margin-bottom: 12px; }
+.entry-cmd { color: var(--accent-a); }
+.entry-cmd::before { content: "> "; color: var(--muted); }
+.reply { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+ol.reply { padding-left: 2rem; }
+.reply-error { color: #fca5a5; }
+.reply-nil, .reply-empty { color: var(--muted); }
+.reply-int, .reply-double { color: var(--accent-b); }
+.reply-binary { color: #fcd34d; }
+.reply-map { display: grid; grid-template-columns: max-content 1fr; gap: 0 16px; }
+.reply-map dt { color: var(--accent-a); }
+.reply-map dd { margin: 0; }
+.console-samples details { margin-bottom: 8px; }
+.console-samples summary { cursor: pointer; font-weight: 600; }
+.console-samples ul { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.console-samples li { display: grid; gap: 2px; font-size: 0.85rem; }
+.console-samples button.sample { text-align: left; padding: 4px 8px; background: var(--surface); color: var(--text); border: 1px solid var(--border); font-weight: 400; overflow-wrap: anywhere; }
+.console-samples .seed { width: 100%; margin-bottom: 12px; }

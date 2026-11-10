@@ -1,0 +1,20 @@
+{{define "console"}}<div class="console">
+  <section class="console-main">
+    <div id="output" class="console-output mono" role="log" aria-live="polite" tabindex="0"></div>
+    <form id="console-form" class="console-form" hx-post="/console/exec" hx-target="#output" hx-swap="beforeend" autocomplete="off">
+      <input id="console-input" class="mono" type="text" name="cmd" placeholder="Type a command, e.g. PING" aria-label="Command"
+             spellcheck="false" autocapitalize="off" autocorrect="off" autofocus
+             hx-get="/console/complete" hx-trigger="input changed delay:120ms" hx-target="#console-hint" hx-swap="innerHTML">
+      <button type="submit">Run</button>
+    </form>
+    <div id="console-hint" class="console-hint muted" aria-live="polite"></div>
+    <p class="muted console-keys">Up/Down: history. Tab: complete. Ctrl+L: clear. Shift+click an example to run it.</p>
+    <ol id="history" hidden>{{range .History}}<li>{{.}}</li>{{end}}</ol>
+  </section>
+  <aside class="console-samples" aria-label="Sample commands">
+    <button type="button" class="seed" hx-post="/console/seed" hx-target="#output" hx-swap="beforeend">Load sample data</button>
+    {{range .Samples}}<details open><summary>{{.Name}}</summary>
+      <ul>{{range .Examples}}<li><button type="button" class="sample mono" data-cmd="{{.Cmd}}" title="{{.Desc}}">{{.Cmd}}</button><span class="muted">{{.Desc}}</span></li>{{end}}</ul>
+    </details>{{end}}
+  </aside>
+</div>{{end}}

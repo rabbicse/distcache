@@ -62,6 +62,9 @@ type Console struct {
 	// trusted holds the parsed web-trusted-proxy prefixes.
 	trusted []netip.Prefix
 
+	// docs caches the command list for autocomplete.
+	docs docsCache
+
 	// authMu guards sessions, lockouts and every session's lastSeen.
 	authMu   sync.Mutex
 	sessions map[string]*session
@@ -92,8 +95,10 @@ type page struct {
 	Insecure  bool   // show the insecure-banner slot
 	Status    int
 	Message   string
-	CSRF      string // session CSRF token (login form token on the login page)
-	HXHeaders string // hx-headers JSON carrying CSRF
+	CSRF      string        // session CSRF token (login form token on the login page)
+	HXHeaders string        // hx-headers JSON carrying CSRF
+	Samples   []sampleGroup // console sample panel
+	History   []string      // console history, newest first
 }
 
 // New builds the console handler and parses templates. It does not listen.
@@ -132,7 +137,10 @@ func New(o Options) (*Console, error) {
 	c.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(static)))
 	c.mux.HandleFunc("GET /{$}", c.pageHandler("Dashboard", "dashboard"))
 	c.mux.HandleFunc("GET /keys", c.pageHandler("Keys", "keys"))
-	c.mux.HandleFunc("GET /console", c.pageHandler("Console", "console"))
+	c.mux.HandleFunc("GET /console", c.handleConsolePage)
+	c.mux.HandleFunc("POST /console/exec", c.handleExec)
+	c.mux.HandleFunc("POST /console/seed", c.handleSeed)
+	c.mux.HandleFunc("GET /console/complete", c.handleComplete)
 	c.mux.HandleFunc("GET /pubsub", c.pageHandler("Pub/Sub", "pubsub"))
 	c.mux.HandleFunc("GET /login", c.handleLoginGet)
 	c.mux.HandleFunc("POST /login", c.handleLoginPost)

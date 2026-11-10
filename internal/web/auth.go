@@ -84,6 +84,8 @@ type session struct {
 
 	mu sync.Mutex      // serialises every db.Exec; server.Session is single-goroutine
 	db *server.Session // nil when the console has no server (tests)
+
+	history []string // console history, newest first; guarded by mu
 }
 
 // lockout tracks login failures from one client IP.
@@ -263,6 +265,11 @@ func (c *Console) newSession(user string) *session {
 	s := &session{id: randomToken(), csrf: randomToken(), user: user, created: now, lastSeen: now}
 	if c.srv != nil {
 		s.db = c.srv.NewSession()
+		// RESP3 lets the console show maps, doubles and booleans natively. A
+		// failure only degrades display to RESP2 shapes, so it is not fatal.
+		if _, err := s.db.Exec("HELLO", "3"); err != nil {
+			c.log.Warn("web session HELLO 3", "err", err)
+		}
 	}
 	var evicted *session
 	c.authMu.Lock()

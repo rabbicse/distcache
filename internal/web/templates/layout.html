@@ -10,7 +10,8 @@
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/htmx.min.js" defer></script>
 <script src="/static/htmx-ext-sse.js" defer></script>
-</head>
+{{if eq .Active "console"}}<script src="/static/console.js" defer></script>
+{{end}}</head>
 <body{{if .HXHeaders}} hx-headers="{{.HXHeaders}}"{{end}}>
 <header class="topbar">
   <a class="brand" href="/"><img src="/static/logo-mark.svg" alt="" width="28" height="28"><span>DistCache</span></a>
@@ -25,7 +26,7 @@
 {{if .Insecure}}<div class="insecure-banner" role="alert" id="insecure-banner">Insecure connection: this console is served over plain HTTP.</div>{{end}}
 <main>
   <h1>{{.Title}}</h1>
-  <p class="muted">This page is coming soon.</p>
+  {{if eq .Active "console"}}{{template "console" .}}{{else}}<p class="muted">This page is coming soon.</p>{{end}}
 </main>
 </body>
 </html>
