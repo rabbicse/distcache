@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeFile(t *testing.T, dir, name, body string) string {
@@ -477,5 +478,59 @@ func TestConfig_LuaTimeLimitAlias(t *testing.T) {
 	}
 	if got := c.Get("lua-time-limit"); len(got) != 1 || got[0][1] != "456" {
 		t.Errorf("lua-time-limit got %v, want 456", got)
+	}
+}
+
+func TestConfig_WebParams(t *testing.T) {
+	d := Default()
+	if d.WebPort != 0 || d.WebBind != "127.0.0.1" || d.WebTLS != "auto" || d.WebInsecure ||
+		d.WebSessionTimeout != 30*time.Minute {
+		t.Errorf("defaults got port=%d bind=%q tls=%q insecure=%v timeout=%v",
+			d.WebPort, d.WebBind, d.WebTLS, d.WebInsecure, d.WebSessionTimeout)
+	}
+
+	c := Default()
+	err := c.ParseArgs([]string{"--web-port", "7380", "--web-tls", "on",
+		"--web-trusted-proxy", "10.0.0.1,10.1.0.0/16", "--web-session-timeout", "45m", "--web-insecure", "yes",
+		"--web-tls-hosts", "a.example,b.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.WebPort != 7380 || c.WebTLS != "on" || !c.WebInsecure || c.WebSessionTimeout != 45*time.Minute {
+		t.Errorf("parsed got port=%d tls=%q insecure=%v timeout=%v", c.WebPort, c.WebTLS, c.WebInsecure, c.WebSessionTimeout)
+	}
+	if want := []string{"10.0.0.1", "10.1.0.0/16"}; !slices.Equal(c.WebTrustedProxy, want) {
+		t.Errorf("trusted proxy got %v, want %v", c.WebTrustedProxy, want)
+	}
+	if want := []string{"a.example", "b.example"}; !slices.Equal(c.WebTLSHosts, want) {
+		t.Errorf("tls hosts got %v, want %v", c.WebTLSHosts, want)
+	}
+
+	if err := Default().ParseArgs([]string{"--web-tls", "maybe"}); err == nil {
+		t.Error("web-tls maybe: want error")
+	}
+	if err := Default().ParseArgs([]string{"--web-session-timeout", "1800"}); err != nil {
+		t.Errorf("plain seconds: %v", err)
+	}
+	s := Default()
+	if err := s.Set("web-session-timeout", "1800", true); err != nil || s.WebSessionTimeout != 30*time.Minute {
+		t.Errorf("seconds got err=%v timeout=%v", err, s.WebSessionTimeout)
+	}
+
+	if got := c.Get("web-port"); len(got) != 1 || got[0][1] != "7380" {
+		t.Errorf("CONFIG GET web-port got %v, want 7380", got)
+	}
+	err = c.Set("web-port", "1", false)
+	if err == nil || !strings.Contains(err.Error(), "can't set immutable config") {
+		t.Errorf("CONFIG SET web-port got %v, want immutable error", err)
+	}
+
+	path := writeFile(t, t.TempDir(), "distcache.conf", "web-port 7380\nweb-bind 0.0.0.0\n")
+	f := Default()
+	if err := f.ParseArgs([]string{path}); err != nil {
+		t.Fatal(err)
+	}
+	if f.WebPort != 7380 || f.WebBind != "0.0.0.0" {
+		t.Errorf("file got port=%d bind=%q", f.WebPort, f.WebBind)
 	}
 }
