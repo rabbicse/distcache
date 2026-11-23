@@ -21,12 +21,14 @@ import (
 	"github.com/rabbicse/distcache/internal/storage"
 )
 
-// Version is the DistCache version. RedisVersion is the Redis version whose
-// command set and replies DistCache implements (reported to clients).
-const (
-	Version      = "1.0.0"
-	RedisVersion = "8.4.0"
-)
+// Version is the DistCache version. It is a variable so release builds can
+// set it with -ldflags "-X .../internal/server.Version=x.y.z" (see
+// scripts/release.sh).
+var Version = "1.0.0"
+
+// RedisVersion is the Redis version whose command set and replies DistCache
+// implements (reported to clients).
+const RedisVersion = "8.4.0"
 
 type stats struct {
 	commands          atomic.Int64

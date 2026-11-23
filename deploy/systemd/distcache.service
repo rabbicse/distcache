@@ -1,0 +1,46 @@
+# systemd unit for DistCache.
+#
+#   sudo useradd --system --home /var/lib/distcache --shell /usr/sbin/nologin distcache
+#   sudo install -m 0755 distcache-server /usr/local/bin/
+#   sudo install -d -o distcache -g distcache -m 0750 /var/lib/distcache
+#   sudo install -D -m 0640 -o root -g distcache distcache.conf /etc/distcache/distcache.conf
+#   sudo install -m 0644 distcache.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now distcache
+#
+# Set "dir /var/lib/distcache" in /etc/distcache/distcache.conf.
+[Unit]
+Description=DistCache in-memory data server
+Documentation=https://github.com/rabbicse/distcache
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=distcache
+Group=distcache
+WorkingDirectory=/var/lib/distcache
+ExecStart=/usr/local/bin/distcache-server /etc/distcache/distcache.conf
+# SIGTERM makes the server stop taking commands, persist and exit.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+# Sandboxing: the server only needs its data directory and the network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/distcache
+
+[Install]
+WantedBy=multi-user.target

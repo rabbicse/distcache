@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: distcache-replica
+  labels:
+    app.kubernetes.io/component: replica
+spec:
+  serviceName: distcache-replica-headless
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: replica
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: replica
+    spec:
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: distcache
+          image: distcache
+          args:
+            - /etc/distcache/distcache.conf
+            - --requirepass
+            - $(DISTCACHE_PASSWORD)
+            - --masterauth
+            - $(DISTCACHE_PASSWORD)
+            - --replicaof
+            - distcache-0.distcache-headless
+            - "6379"
+          env:
+            - name: DISTCACHE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: distcache-auth
+                  key: password
+            - name: GOMEMLIMIT
+              value: 1800MiB
+          ports:
+            - name: resp
+              containerPort: 6379
+          startupProbe:
+            tcpSocket:
+              port: resp
+            periodSeconds: 2
+            failureThreshold: 150
+          readinessProbe:
+            tcpSocket:
+              port: resp
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: resp
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1536Mi
+            limits:
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/distcache
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: distcache-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

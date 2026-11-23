@@ -1,0 +1,23 @@
+# One primary plus read-only replicas.
+#
+#   kubectl apply -k deploy/kubernetes/overlays/replication
+#
+# Writes go to the "distcache" Service, reads may go to "distcache-replica".
+# Replication is asynchronous and there is no automatic failover: if the
+# primary pod is lost, Kubernetes restarts it and it reloads its own data.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: distcache
+resources:
+  - ../../base
+  - replica-service.yaml
+  - replica-statefulset.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/name: distcache
+      app.kubernetes.io/part-of: distcache
+    includeSelectors: true
+images:
+  - name: distcache
+    newName: ghcr.io/rabbicse/distcache
+    newTag: "1.0.0"

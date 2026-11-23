@@ -1,0 +1,25 @@
+# Single DistCache node with a persistent volume.
+#
+#   kubectl create namespace distcache
+#   kubectl -n distcache create secret generic distcache-auth \
+#     --from-literal=password="$(openssl rand -base64 32)"
+#   kubectl apply -k deploy/kubernetes/base
+#
+# See docs/guides/03-deployment.md for the image, sizing and limits.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: distcache
+resources:
+  - configmap.yaml
+  - service.yaml
+  - statefulset.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/name: distcache
+      app.kubernetes.io/part-of: distcache
+    includeSelectors: true
+images:
+  # Point this at the registry you pushed the image to.
+  - name: distcache
+    newName: ghcr.io/rabbicse/distcache
+    newTag: "1.0.0"

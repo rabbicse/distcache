@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: distcache-config
+data:
+  distcache.conf: |
+    bind 0.0.0.0
+    port 6379
+    dir /data
+    # The password comes from the distcache-auth Secret (see the StatefulSet).
+    protected-mode yes
+
+    # Durability: log every write, fsync once a second.
+    appendonly yes
+    appendfsync everysec
+    save 3600 1 300 100 60 10000
+
+    # Keep the data set well below the container memory limit: the limit also
+    # has to hold client buffers, the replication backlog and Go's own
+    # overhead. Raise both together.
+    maxmemory 1gb
+    maxmemory-policy noeviction

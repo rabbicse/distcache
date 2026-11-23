@@ -36,3 +36,5 @@ bin/
 coverage.html
 dump.dcs
 appendonly.aof
+.claude/worktrees/
+dist/
