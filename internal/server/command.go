@@ -84,14 +84,19 @@ type KeysFunc func(args [][]byte) (pos []int, lockAll bool)
 
 // Command is an entry in the command table.
 type Command struct {
-	Name     string
-	Arity    int
-	Flags    Flag
-	First    int
-	Last     int
-	Step     int
-	Group    string
-	Keys     KeysFunc
+	Name  string
+	Arity int
+	Flags Flag
+	First int
+	Last  int
+	Step  int
+	Group string
+	Keys  KeysFunc
+	// LockKeys, when set, returns positions of keys the handler reads that
+	// the key spec does not declare (a key addressed through a subcommand,
+	// such as MEMORY USAGE key). They are locked like declared keys, also by
+	// EXEC, but are not reported by COMMAND GETKEYS.
+	LockKeys KeysFunc
 	Handler  Handler
 	Subs     []string
 	Calls    atomic.Int64
@@ -154,7 +159,10 @@ type Ctx struct {
 	prop     [][][]byte
 	propSet  bool
 	keys     []string
-	allLocks bool // every shard is already locked (EXEC/script)
+	allLocks bool // every shard is already locked (lockall command, EXEC with LockAll, script)
+	// keysLocked reports that the shards of keysOf(Cmd, Args) are already
+	// locked by call or by the enclosing EXEC, so withKeys must not relock.
+	keysLocked bool
 	// writeLocked reports that the shard locks held for this command are
 	// write locks, so a non-write command (FlagExclusive) may mutate values.
 	writeLocked bool
@@ -190,6 +198,9 @@ type executionUnit struct {
 	// writeLocked is set by EXEC when it took write locks, so the queued
 	// commands' contexts know they may mutate (see Ctx.writeLocked).
 	writeLocked bool
+	// allLocks is set by EXEC when it locked every shard, so the queued
+	// commands' contexts may walk the whole keyspace.
+	allLocks bool
 }
 
 // propagatedCommand is one command queued in an executionUnit together with

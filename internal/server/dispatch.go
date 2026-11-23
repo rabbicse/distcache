@@ -5,6 +5,7 @@ package server
 import (
 	"bytes"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -194,6 +195,11 @@ func (s *Server) waitPause(cmd *Command) {
 // whole keyspace locked.
 func keysOf(cmd *Command, args [][]byte) ([]string, bool) {
 	pos, lockAll := cmd.KeyPositions(args)
+	if cmd.LockKeys != nil {
+		extra, all := cmd.LockKeys(args)
+		pos = append(slices.Clip(pos), extra...)
+		lockAll = lockAll || all
+	}
 	if cmd.Has(FlagLockAll) {
 		lockAll = true
 	}
@@ -214,7 +220,10 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 	ctx := &Ctx{server: s, client: c, Cmd: cmd, Args: args, W: w, keys: keys, inScript: inScript}
 	ctx.isMaster = c != nil && c.isMaster
 	ctx.inMulti = locked && !inScript
-	ctx.allLocks = locked
+	// Scripts always run under LockAll; EXEC may hold only the shards of the
+	// queued keys, which keysOf covers (keysLocked).
+	ctx.allLocks = locked && (inScript || unit.allLocks)
+	ctx.keysLocked = locked
 	write := cmd.Has(FlagWrite)
 	ctx.DB = s.newDB(c, write)
 	ctx.canBlock = cmd.Has(FlagBlocking) && !locked && c != nil
@@ -249,6 +258,7 @@ func (s *Server) call(c *Client, cmd *Command, args [][]byte, w *resp.Writer, un
 			// and they already show up in the global command counter.
 			s.keyspace.CountOps(idx)
 			hasLocks = true
+			ctx.keysLocked = true
 		}
 		// waiter is registered on the first block and kept across retries so
 		// the client keeps its FIFO position on the keys.
@@ -591,9 +601,11 @@ func (c *Ctx) withShard(i int, write bool, fn func()) {
 	fn()
 }
 
-// withKeys locks the shards of keys (if not already held) and runs fn.
+// withKeys locks the shards of keys (if not already held) and runs fn. keys
+// must be among keysOf(c.Cmd, c.Args) (declare them through Keys or LockKeys):
+// inside EXEC only those shards are held, and locking more could deadlock.
 func (c *Ctx) withKeys(keys []string, write bool, fn func()) {
-	if c.allLocks {
+	if c.allLocks || c.keysLocked {
 		fn()
 		return
 	}

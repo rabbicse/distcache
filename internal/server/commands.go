@@ -3,6 +3,7 @@
 package server
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -308,13 +309,36 @@ func (s *Server) registerCommands() {
 	s.commands["function"].Subs = []string{"load", "list", "delete", "flush", "dump", "restore", "stats", "kill", "help"}
 }
 
+// lockKeysFor returns the LockKeys of commands that read a key named only
+// through a subcommand, keyed by the original (not renamed) command name.
+func lockKeysFor(name string) KeysFunc {
+	switch name {
+	case "memory":
+		return subcommandKey("usage")
+	case "debug":
+		return subcommandKey("object")
+	}
+	return nil
+}
+
+// subcommandKey returns a KeysFunc for commands like MEMORY USAGE key, whose
+// key is the argument after one of the given subcommands.
+func subcommandKey(subs ...string) KeysFunc {
+	return func(args [][]byte) ([]int, bool) {
+		if len(args) > 2 && slices.ContainsFunc(subs, func(sub string) bool { return strings.EqualFold(string(args[1]), sub) }) {
+			return []int{2}, false
+		}
+		return nil, false
+	}
+}
+
 // addCommand builds a Command from sp and adds it to the command table,
 // honouring rename-command (an empty new name disables the command). It is
 // not safe for concurrent use: call it only while no client is executing.
 func (s *Server) addCommand(sp commandSpec, renamed map[string]string, notifyClass map[string]int64) {
 	cmd := &Command{
 		Name: sp.name, Arity: sp.arity, Flags: parseFlags(sp.flags), First: sp.first, Last: sp.last,
-		Step: sp.step, Group: sp.group, Handler: sp.handler, Keys: sp.keys,
+		Step: sp.step, Group: sp.group, Handler: sp.handler, Keys: sp.keys, LockKeys: lockKeysFor(sp.name),
 	}
 	if cmd.Has(FlagWrite) {
 		cmd.NotifyClass = notifyClass[sp.group]
