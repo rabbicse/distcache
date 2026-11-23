@@ -256,6 +256,9 @@ func (s *Server) acceptLoop(ln net.Listener) error {
 			return err
 		}
 		s.stats.connections.Add(1)
+		if s.rejectProtected(conn) {
+			continue
+		}
 		s.clientsMu.RLock()
 		n := int64(len(s.clients))
 		s.clientsMu.RUnlock()

@@ -52,6 +52,8 @@ make docker
 docker run --rm -p 6379:6379 distcache:dev
 ```
 
+Like Redis, the server runs with `protected-mode yes`: while no `requirepass` is set it only accepts clients from loopback or a Unix socket and answers others with `-DENIED`. The Docker image passes `--protected-mode no` because the published port is the access control there; set `--requirepass` for anything beyond local use. `dir`, `dbfilename` and `appendfilename` are protected configs: CONFIG SET refuses them unless the server was started with `enable-protected-configs yes` (or `local`, for loopback clients only).
+
 Client examples in Go, Java, Python and Node are in [examples/README.md](examples/README.md). A walkthrough for poking at the server by hand is in [docs/guides/01-manual-testing.md](docs/guides/01-manual-testing.md).
 
 ## Configuration

@@ -117,6 +117,7 @@ type Config struct {
 	StopWritesOnBgsave  atomic.Bool
 	LazyFreeUserDel     atomic.Bool
 	RequirePassSet      atomic.Bool
+	ProtectedMode       atomic.Bool // protected-mode: without a password, loopback peers only
 	BusyReplyThreshold  atomic.Int64
 	ClientQueryBufLimit atomic.Int64
 
@@ -259,6 +260,7 @@ func Default() *Config {
 	c.LFULogFactor.Store(10)
 	c.LFUDecayTime.Store(1)
 	c.ActiveExpire.Store(true)
+	c.ProtectedMode.Store(true)
 	c.HashMaxEntries.Store(128)
 	c.HashMaxValue.Store(64)
 	c.SetMaxIntset.Store(512)
@@ -370,7 +372,7 @@ func (c *Config) add(name string, mutable bool, get func(*Config) string, set fu
 }
 
 // ignoredParams are accepted for redis.conf compatibility but have no effect.
-var ignoredParams = []string{"protected-mode", "daemonize", "supervised", "tcp-backlog", "io-threads",
+var ignoredParams = []string{"daemonize", "supervised", "tcp-backlog", "io-threads",
 	"io-threads-do-reads", "always-show-logo", "set-proc-title", "rdbcompression", "rdbchecksum",
 	"rdb-del-sync-files", "stop-writes-on-bgsave-error-ignored", "replica-serve-stale-data",
 	"repl-diskless-sync", "repl-diskless-sync-delay", "repl-diskless-load", "repl-disable-tcp-nodelay",
@@ -465,6 +467,7 @@ func (c *Config) registerParams() {
 			return errors.New("argument(s) must be one of the following: always, everysec, no")
 		})
 	c.boolParam("appendonly", &c.AppendOnly)
+	c.boolParam("protected-mode", &c.ProtectedMode)
 	c.add("save", true, func(c *Config) string {
 		parts := []string{}
 		for _, s := range c.Save {

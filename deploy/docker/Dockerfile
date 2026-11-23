@@ -13,4 +13,7 @@ COPY --from=build /out/distcache-server /distcache-server
 EXPOSE 6379
 VOLUME /data
 ENTRYPOINT ["/distcache-server"]
-CMD ["--dir","/data"]
+# Inside a container every client arrives from a non-loopback address, so the
+# published port is the access control: protected mode is off here. Set
+# --requirepass for anything beyond local use.
+CMD ["--dir","/data","--protected-mode","no"]
