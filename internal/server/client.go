@@ -189,16 +189,24 @@ func (s *Server) closeClient(c *Client) {
 	s.watches.unwatchAll(c)
 	s.removeMonitor(c)
 	c.pushMu.Lock()
-	c.dead = true
-	if c.pushCh != nil {
-		close(c.pushCh)
-	}
+	c.closePushLocked()
 	c.pushMu.Unlock()
 	s.clientsMu.Lock()
 	delete(s.clients, c.id)
 	s.clientsMu.Unlock()
 	if c.replica != nil {
 		s.replication.removeReplica(c.replica)
+	}
+}
+
+// closePushLocked marks the client dead and closes its push queue exactly
+// once. Both an overflowing push and client teardown end up here, so the queue
+// is cleared after closing. The caller holds pushMu.
+func (c *Client) closePushLocked() {
+	c.dead = true
+	if c.pushCh != nil {
+		close(c.pushCh)
+		c.pushCh = nil
 	}
 }
 
@@ -245,8 +253,7 @@ func (c *Client) push(msg []byte) {
 	select {
 	case c.pushCh <- msg:
 	default:
-		c.dead = true
-		close(c.pushCh)
+		c.closePushLocked()
 		c.s.stats.evictedClients.Add(1)
 		c.s.log.Warn("client closed for overcoming of output buffer limits", "id", c.id, "addr", c.addr)
 		_ = c.conn.Close() // best-effort: cleanup after failure or teardown

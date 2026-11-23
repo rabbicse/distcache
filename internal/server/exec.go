@@ -166,10 +166,7 @@ func (ss *Session) Close() {
 	default:
 	}
 	c.pushMu.Lock()
-	c.dead = true
-	if c.pushCh != nil {
-		close(c.pushCh)
-	}
+	c.closePushLocked()
 	c.pushMu.Unlock()
 }
 
