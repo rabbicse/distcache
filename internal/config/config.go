@@ -710,6 +710,11 @@ func (c *Config) loadFile(path string) error {
 func (c *Config) applyDirective(args []string) error {
 	name := strings.ToLower(args[0])
 	val := strings.Join(args[1:], " ")
+	if name == "rename-command" && len(args) == 3 && args[2] == "" {
+		// Joining would lose the empty new name that disables a command;
+		// the setter strips these quotes back off.
+		val = args[1] + ` ""`
+	}
 	if name == "save" && !c.saveSeen {
 		c.saveSeen = true
 		c.Save = nil
