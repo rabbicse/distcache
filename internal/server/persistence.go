@@ -123,6 +123,11 @@ func (s *Server) saveSync() error {
 	if err == nil {
 		err = os.Rename(tmp, path)
 	}
+	if err == nil {
+		if derr := syncDir(s.cfg.Dir); derr != nil {
+			s.log.Warn("fsync of the snapshot directory failed", "err", derr)
+		}
+	}
 	if err != nil {
 		_ = os.Remove(tmp) // best-effort: cleanup after failure or teardown
 		s.stats.lastBgsaveOK.Store(false)

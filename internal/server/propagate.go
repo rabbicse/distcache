@@ -272,19 +272,7 @@ func (s *Server) rewriteAOF() error {
 					err = f.Sync()
 				}
 				if err == nil {
-					err = os.Rename(tmp, p.aofPath())
-				}
-				if err == nil {
-					if p.aofFile != nil {
-						p.flushAOFLocked()
-						_ = p.aofFile.Close()
-					}
-					p.aofFile = f
-					st, _ := f.Stat()
-					if st != nil {
-						p.aofSize = st.Size()
-					}
-					p.writerOnce.Do(func() { go p.aofWriter() })
+					err = p.swapAOFLocked(f, tmp)
 				}
 				p.rewrite = nil
 				p.mu.Unlock()
@@ -315,7 +303,7 @@ func (s *Server) rewriteAOF() error {
 	if !s.cfg.AppendOnly.Load() {
 		// Rewrite requested while AOF is off: keep the file but stop logging.
 		p.mu.Lock()
-		if p.aofFile == f {
+		if f := p.aofFile; f != nil {
 			p.aofFile = nil
 			if cerr := f.Close(); cerr != nil {
 				s.log.Warn("closing AOF after rewrite failed", "err", cerr)
@@ -327,6 +315,48 @@ func (s *Server) rewriteAOF() error {
 	s.stats.lastAofRewriteOK.Store(true)
 	s.log.Info("Background AOF rewrite finished successfully")
 	return nil
+}
+
+// swapAOFLocked installs the finished rewrite tmp (written through f) as the
+// AOF. Every handle on either file is closed before the rename, which Windows
+// requires, and the AOF is reopened for appending afterwards. p.mu is held
+// throughout, so no write can land between the two files: the bytes still
+// buffered for the old file are already part of the rewrite.
+func (p *propagator) swapAOFLocked(f *os.File, tmp string) error {
+	if err := f.Close(); err != nil {
+		return err
+	}
+	hadOld := p.aofFile != nil
+	if hadOld {
+		p.flushAOFLocked()
+		if err := p.aofFile.Close(); err != nil {
+			p.server.log.Warn("closing the old AOF failed", "err", err)
+		}
+		p.aofFile = nil
+	}
+	path := p.aofPath()
+	renameErr := os.Rename(tmp, path)
+	if renameErr == nil {
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			p.server.log.Warn("fsync of the AOF directory failed", "err", err)
+		}
+	} else if !hadOld {
+		return renameErr
+	}
+	// After a failed rename the old file is reopened, so logging carries on
+	// where it was.
+	nf, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		p.aofErr = err
+		p.server.log.Warn("reopening the AOF failed, AOF logging stopped", "err", err)
+		return errors.Join(renameErr, err)
+	}
+	p.aofFile = nf
+	if st, err := nf.Stat(); err == nil {
+		p.aofSize = st.Size()
+	}
+	p.writerOnce.Do(func() { go p.aofWriter() })
+	return renameErr
 }
 
 // loadAOF replays the append-only file.
