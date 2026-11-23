@@ -1197,6 +1197,21 @@ func cmdXPending(c *Ctx) {
 	}
 }
 
+// propagateClaim marks the command dirty and propagates one pending entry's
+// new state as a forced, absolute XCLAIM. XCLAIM and XAUTOCLAIM decide what
+// to claim from the local clock (min-idle-time), so replaying the original
+// command on a replica or from the AOF could claim different entries. The
+// replayed form has min-idle-time 0 and carries the delivery time and count.
+// For an entry already deleted from the stream the replay removes it from
+// the pending list, exactly as it did here.
+func (c *Ctx) propagateClaim(key, group, consumer string, pe *ds.PendingEntry, lastID ds.StreamID) {
+	c.Dirty(1)
+	c.RewriteStrings("XCLAIM", key, group, consumer, "0", pe.ID.String(),
+		"TIME", strconv.FormatInt(pe.DeliveryTime, 10),
+		"RETRYCOUNT", strconv.FormatInt(pe.DeliveryCount, 10),
+		"FORCE", "JUSTID", "LASTID", lastID.String())
+}
+
 func cmdXClaim(c *Ctx) {
 	key, group, consumer := c.Arg(1), c.Arg(2), c.Arg(3)
 	minIdle, ok := c.Int(4)
@@ -1272,11 +1287,16 @@ func cmdXClaim(c *Ctx) {
 	if !ok {
 		return
 	}
-	if lastSet && lastID.Cmp(g.LastID) > 0 {
+	lastIDMoved := lastSet && lastID.Cmp(g.LastID) > 0
+	if lastIDMoved {
 		g.LastID = lastID
 	}
-	cons, _ := g.Consumer(consumer, now, true)
+	cons, created := g.Consumer(consumer, now, true)
 	cons.SeenTime = now
+	if created {
+		c.Dirty(1)
+		c.RewriteStrings("XGROUP", "CREATECONSUMER", key, group, consumer)
+	}
 	var claimed []ds.StreamEntry
 	var claimedIDs []ds.StreamID
 	for _, id := range ids {
@@ -1290,7 +1310,11 @@ func cmdXClaim(c *Ctx) {
 			continue
 		}
 		if !exists {
+			// The entry was deleted from the stream: drop it from the PEL and
+			// let the replica do the same by replaying a forced claim.
+			c.propagateClaim(key, group, consumer, pe, g.LastID)
 			g.RemovePending(id)
+			lastIDMoved = false
 			continue
 		}
 		if minIdle > 0 && now-pe.DeliveryTime < minIdle {
@@ -1312,10 +1336,16 @@ func cmdXClaim(c *Ctx) {
 			pe.DeliveryCount++
 		}
 		cons.ActiveTime = now
+		c.propagateClaim(key, group, consumer, pe, g.LastID)
+		lastIDMoved = false
 		claimedIDs = append(claimedIDs, id)
 		claimed = append(claimed, *entry)
 	}
-	c.Dirty(1)
+	if lastIDMoved {
+		c.Dirty(1)
+		c.RewriteStrings("XGROUP", "SETID", key, group, g.LastID.String(), "ENTRIESREAD", strconv.FormatInt(g.EntriesRead, 10))
+	}
+	c.NoPropagate() // only the effects above are propagated, never the command itself
 	c.W.WriteArrayLen(len(claimedIDs))
 	for k, id := range claimedIDs {
 		if justID {
@@ -1366,29 +1396,37 @@ func cmdXAutoClaim(c *Ctx) {
 		return
 	}
 	now := c.NowMs()
-	cons, _ := g.Consumer(consumer, now, true)
+	cons, created := g.Consumer(consumer, now, true)
 	cons.SeenTime = now
+	if created {
+		c.Dirty(1)
+		c.RewriteStrings("XGROUP", "CREATECONSUMER", key, group, consumer)
+	}
 	var claimed []ds.StreamEntry
 	var claimedIDs []ds.StreamID
 	var deleted []ds.StreamID
-	next := ds.StreamID{}
+	// Like Redis, the scan visits at most count*10 pending entries, and COUNT
+	// bounds the reply: claimed and deleted entries both count towards it.
+	// One extra candidate is collected so the next cursor is known.
 	attempts := count * 10
-	var visited []ds.StreamID
+	var candidates []ds.StreamID
 	g.PendingRange(start, ds.MaxStreamID, func(pe *ds.PendingEntry) bool {
-		if attempts <= 0 || int64(len(claimedIDs)) >= count {
-			next = pe.ID
-			return false
-		}
-		attempts--
-		visited = append(visited, pe.ID)
-		return true
+		candidates = append(candidates, pe.ID)
+		return int64(len(candidates)) <= attempts
 	})
-	for _, id := range visited {
+	visited := 0
+	for remaining := count; visited < len(candidates) && attempts > 0 && remaining > 0; visited++ {
+		attempts--
+		id := candidates[visited]
 		pe := g.PEL[id]
 		entry, exists := s.Get(id)
 		if !exists {
+			// The entry was deleted from the stream: drop it from the PEL and
+			// let the replica do the same by replaying a forced claim.
+			c.propagateClaim(key, group, consumer, pe, g.LastID)
 			g.RemovePending(id)
 			deleted = append(deleted, id)
+			remaining--
 			continue
 		}
 		if minIdle > 0 && now-pe.DeliveryTime < minIdle {
@@ -1404,10 +1442,16 @@ func cmdXAutoClaim(c *Ctx) {
 			pe.DeliveryCount++
 		}
 		cons.ActiveTime = now
+		c.propagateClaim(key, group, consumer, pe, g.LastID)
 		claimedIDs = append(claimedIDs, id)
 		claimed = append(claimed, *entry)
+		remaining--
 	}
-	c.Dirty(1)
+	next := ds.StreamID{}
+	if visited < len(candidates) {
+		next = candidates[visited]
+	}
+	c.NoPropagate() // only the effects above are propagated, never the command itself
 	c.W.WriteArrayLen(3)
 	c.W.WriteBulkString(next.String())
 	c.W.WriteArrayLen(len(claimedIDs))
