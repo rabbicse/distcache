@@ -360,30 +360,44 @@ func (s *Server) loadAOF(path string) error {
 	r := resp.NewReader(br, 1<<16)
 	r.MaxBulkLen = resp.Unlimited
 	r.MaxMultiBulk = resp.Unlimited
+	// pos is the file offset of the next unparsed byte. r normally wraps br
+	// itself (bufio returns a large enough reader unchanged), in which case
+	// its buffer must not be counted twice.
+	pos := func() int64 {
+		n := cr.n - int64(br.Buffered())
+		if r.Underlying() != br {
+			n -= int64(r.Buffered())
+		}
+		return n
+	}
 	cmds := 0
 	var inMulti bool
-	lastGood := cr.n - int64(br.Buffered())
+	lastGood := pos()    // end of the last complete command
+	var multiStart int64 // offset of the MULTI that opened the current block
 	for {
 		args, err := r.ReadCommand()
-		if err == io.EOF {
+		if err == io.EOF && pos() == lastGood {
 			break
 		}
 		if err != nil {
-			if errors.Is(err, io.ErrUnexpectedEOF) {
-				s.log.Warn("AOF truncated, discarding incomplete tail", "valid_bytes", lastGood)
-				_ = os.Truncate(path, lastGood)
-				break
+			// Any EOF past lastGood, even inside a "*N" or "$N" header, is a
+			// tail cut by a crash.
+			if err != io.EOF && !errors.Is(err, io.ErrUnexpectedEOF) {
+				return fmt.Errorf("bad AOF format: %w", err)
 			}
-			return fmt.Errorf("bad AOF format: %w", err)
+			s.log.Warn("AOF truncated, discarding incomplete tail", "valid_bytes", lastGood)
+			break
 		}
-		lastGood = cr.n - int64(br.Buffered()) - int64(r.Buffered())
-		if args == nil {
+		start := lastGood
+		lastGood = pos()
+		if len(args) == 0 {
 			continue
 		}
 		name := string(bytes.ToLower(args[0]))
 		switch name {
 		case "multi":
 			inMulti = true
+			multiStart = start
 		case "exec":
 			inMulti = false
 		}
@@ -392,8 +406,16 @@ func (s *Server) loadAOF(path string) error {
 		cmds++
 	}
 	if inMulti {
-		// Unterminated transaction: discard it, like Redis does.
+		// Unterminated transaction: discard it, like Redis does, and drop it
+		// from the file so later appends are not swallowed into it.
 		fake.multi = nil
+		s.log.Warn("AOF ends inside MULTI, reverting the incomplete transaction", "valid_bytes", multiStart)
+		lastGood = multiStart
+	}
+	if st, err := f.Stat(); err == nil && st.Size() > lastGood {
+		if err := os.Truncate(path, lastGood); err != nil {
+			return fmt.Errorf("truncating AOF tail: %w", err)
+		}
 	}
 	s.log.Info("DB loaded from append only file", "preamble_keys", keys, "commands", cmds)
 	return nil
