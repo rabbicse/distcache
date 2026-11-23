@@ -131,6 +131,40 @@ type parser struct {
 	lx    *lexer
 	tok   token
 	ahead *token
+	level int // nested statements and subexpressions (parser recursion)
+	depth int // level plus chained operators and suffixes (AST depth)
+}
+
+// The parser, compiler and evaluator all recurse over the AST, so its depth
+// is bounded to keep a hostile script from overflowing the Go stack, which
+// is fatal. maxSyntaxLevels matches Lua 5.1's LUAI_MAXCCALLS; maxASTDepth
+// also bounds left-associative chains such as a+a+a... and t[1][1]...,
+// which Lua builds iteratively but this tree-walking evaluator does not.
+const (
+	maxSyntaxLevels = 200
+	maxASTDepth     = 1 << 14
+)
+
+// enterLevel records one level of parser recursion; leaveLevel undoes it.
+func (p *parser) enterLevel() {
+	p.level++
+	p.deepen()
+	if p.level > maxSyntaxLevels {
+		p.lx.errf(p.tok.line, "", "chunk has too many syntax levels")
+	}
+}
+
+func (p *parser) leaveLevel() {
+	p.level--
+	p.depth--
+}
+
+// deepen records one more level of AST nesting without parser recursion.
+func (p *parser) deepen() {
+	p.depth++
+	if p.depth > maxASTDepth {
+		p.lx.errf(p.tok.line, "", "chunk has too many syntax levels")
+	}
 }
 
 func (p *parser) next() {
@@ -243,6 +277,8 @@ func (p *parser) block() []stmt {
 }
 
 func (p *parser) statement() stmt {
+	p.enterLevel()
+	defer p.leaveLevel()
 	line := p.tok.line
 	if p.tok.kind == tKeyword {
 		switch p.tok.s {
@@ -425,6 +461,12 @@ const unaryPri = 8
 func (p *parser) expr() expr { return p.subexpr(0) }
 
 func (p *parser) subexpr(limit int) expr {
+	p.enterLevel()
+	depth := p.depth
+	defer func() {
+		p.depth = depth
+		p.leaveLevel()
+	}()
 	var e expr
 	if (p.tok.kind == tKeyword && p.tok.s == "not") || (p.tok.kind == tOp && (p.tok.s == "-" || p.tok.s == "#")) {
 		op := p.tok.s
@@ -450,6 +492,7 @@ func (p *parser) subexpr(limit int) expr {
 		op := p.tok.s
 		line := p.tok.line
 		p.next()
+		p.deepen()
 		r := p.subexpr(pri[1])
 		e = &eBinop{op: op, l: e, r: r, line: line}
 	}
@@ -543,7 +586,10 @@ func (p *parser) primaryExpr() expr {
 	default:
 		p.lx.errf(p.tok.line, tokText(p.tok), "unexpected symbol")
 	}
+	depth := p.depth
+	defer func() { p.depth = depth }()
 	for {
+		p.deepen()
 		line = p.tok.line
 		switch {
 		case p.check("."):

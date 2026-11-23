@@ -183,7 +183,11 @@ func (L *State) call(fn Value, args []Value, desc string) []Value {
 		return r
 	case *Table:
 		if f.Meta != nil {
-			if h := f.Meta.RawGet("__call"); h != nil {
+			// Like Lua 5.1's tryfuncTM, __call is followed once: a
+			// handler that is itself a table is not callable, so a
+			// self-referencing __call cannot loop.
+			switch h := f.Meta.RawGet("__call").(type) {
+			case *Closure, *GoFunction:
 				return L.call(h, append([]Value{f}, args...), desc)
 			}
 		}
@@ -223,60 +227,73 @@ func (L *State) callClosure(cl *Closure, args []Value) []Value {
 
 // ---- metamethod-aware operations ----
 
+// maxTagLoop bounds __index/__newindex table chains like Lua's MAXTAGLOOP,
+// so a metatable cycle raises an error instead of recursing until the Go
+// stack overflows (a fatal, unrecoverable error).
+const maxTagLoop = 100
+
 func (L *State) index(o, k Value, desc string) Value {
-	switch t := o.(type) {
-	case *Table:
-		v := t.RawGet(k)
-		if v != nil || t.Meta == nil {
-			return v
-		}
-		h := t.Meta.RawGet("__index")
-		switch hh := h.(type) {
-		case nil:
-			return nil
+	for range maxTagLoop {
+		switch t := o.(type) {
 		case *Table:
-			return L.index(hh, k, desc)
-		default:
-			r := L.call(hh, []Value{t, k}, "__index")
-			if len(r) > 0 {
-				return r[0]
+			v := t.RawGet(k)
+			if v != nil || t.Meta == nil {
+				return v
 			}
-			return nil
+			h := t.Meta.RawGet("__index")
+			switch hh := h.(type) {
+			case nil:
+				return nil
+			case *Table:
+				o = hh
+				continue
+			default:
+				r := L.call(hh, []Value{t, k}, "__index")
+				if len(r) > 0 {
+					return r[0]
+				}
+				return nil
+			}
+		case string:
+			if L.stringLib != nil {
+				return L.stringLib.RawGet(k)
+			}
 		}
-	case string:
-		if L.stringLib != nil {
-			return L.stringLib.RawGet(k)
-		}
+		L.RuntimeError("attempt to index %s", what(desc, o))
 	}
-	L.RuntimeError("attempt to index %s", what(desc, o))
+	L.RuntimeError("loop in gettable")
 	return nil
 }
 
 func (L *State) setIndex(o, k, v Value, desc string) {
-	t, ok := o.(*Table)
-	if !ok {
-		L.RuntimeError("attempt to index %s", what(desc, o))
-	}
-	if k == nil {
-		L.RuntimeError("table index is nil")
-	}
-	if f, isNum := k.(float64); isNum && math.IsNaN(f) {
-		L.RuntimeError("table index is NaN")
-	}
-	if t.ReadOnly {
-		L.RuntimeError("Attempt to modify a readonly table")
-	}
-	if t.Meta != nil && t.RawGet(k) == nil {
-		if h := t.Meta.RawGet("__newindex"); h != nil {
-			if ht, ok := h.(*Table); ok {
-				L.setIndex(ht, k, v, desc)
+	for range maxTagLoop {
+		t, ok := o.(*Table)
+		if !ok {
+			L.RuntimeError("attempt to index %s", what(desc, o))
+		}
+		if k == nil {
+			L.RuntimeError("table index is nil")
+		}
+		if f, isNum := k.(float64); isNum && math.IsNaN(f) {
+			L.RuntimeError("table index is NaN")
+		}
+		if t.ReadOnly {
+			L.RuntimeError("Attempt to modify a readonly table")
+		}
+		if t.Meta != nil && t.RawGet(k) == nil {
+			if h := t.Meta.RawGet("__newindex"); h != nil {
+				if ht, ok := h.(*Table); ok {
+					o = ht
+					continue
+				}
+				L.call(h, []Value{t, k, v}, "__newindex")
 				return
 			}
-			L.call(h, []Value{t, k, v}, "__newindex")
-			return
 		}
+		t.RawSet(k, v)
+		return
 	}
-	t.RawSet(k, v)
+	L.RuntimeError("loop in settable")
 }
 
 func (L *State) getGlobal(name string) Value {
