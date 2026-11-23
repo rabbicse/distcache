@@ -38,7 +38,17 @@ type Reader struct {
 	// MaxMultiBulk caps aggregate lengths. Internal readers of trusted data
 	// (Lua reply conversion, AOF loading, in-process sessions) raise it.
 	MaxMultiBulk int64
+	// Unauthenticated applies Redis's limits for clients that still have to
+	// AUTH: at most unauthMultiBulk arguments of unauthBulkLen bytes each.
+	Unauthenticated bool
 }
+
+// Limits Redis applies before a client authenticates, so an anonymous peer
+// cannot make the server buffer large requests.
+const (
+	unauthMultiBulk = 10
+	unauthBulkLen   = 16 * 1024
+)
 
 // Unlimited is a MaxBulkLen/MaxMultiBulk value for readers of trusted,
 // server-generated data.
@@ -115,6 +125,9 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 	if !ok || n > r.MaxMultiBulk {
 		return nil, &ProtocolError{"invalid multibulk length"}
 	}
+	if r.Unauthenticated && n > unauthMultiBulk {
+		return nil, &ProtocolError{"unauthenticated multibulk length"}
+	}
 	if n <= 0 {
 		return nil, nil
 	}
@@ -134,6 +147,9 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 		l, ok := parseInt(line)
 		if !ok || l < 0 || l > r.MaxBulkLen {
 			return nil, &ProtocolError{"invalid bulk length"}
+		}
+		if r.Unauthenticated && l > unauthBulkLen {
+			return nil, &ProtocolError{"unauthenticated bulk length"}
 		}
 		buf := make([]byte, l+2)
 		if _, err := io.ReadFull(r.br, buf); err != nil {

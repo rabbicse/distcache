@@ -152,6 +152,7 @@ func (s *Server) serveClient(c *Client) {
 		} else if to > 0 {
 			_ = c.conn.SetReadDeadline(time.Time{})
 		}
+		c.reader.Unauthenticated = !c.authed && s.cfg.RequirePassSet.Load()
 		args, err := c.reader.ReadCommand()
 		if err != nil {
 			var pe *resp.ProtocolError
