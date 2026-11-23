@@ -649,6 +649,9 @@ func (r *replication) syncWithMaster(host, port string, stop chan struct{}) erro
 		}
 		p.mu.Unlock()
 		r.masterOffset.Store(off)
+		if err := r.rewriteAOFAfterSync(); err != nil {
+			return err
+		}
 		r.server.log.Info("MASTER <-> REPLICA sync: finished with success", "bytes", n)
 	case strings.HasPrefix(line, "+CONTINUE"):
 		f := strings.Fields(line)
@@ -682,6 +685,27 @@ func (r *replication) loadFromMaster(payload []byte) error {
 	s.watches.touchDB(-1)
 	s.blocker.signalAll()
 	return err
+}
+
+// rewriteAOFAfterSync rewrites the AOF from the dataset just loaded from the
+// master, like Redis' restartAOFAfterSYNC: the old file only holds this
+// node's pre-sync history, so without it a restart would lose the synced
+// data. It runs before streaming starts, so the master's stream follows the
+// new preamble.
+func (r *replication) rewriteAOFAfterSync() error {
+	s := r.server
+	if !s.cfg.AppendOnly.Load() {
+		return nil
+	}
+	// A rewrite already running snapshotted the pre-sync dataset; let it
+	// finish and rewrite again.
+	for s.aofRewriting.Load() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := s.rewriteAOF(); err != nil {
+		return fmt.Errorf("rewriting AOF after full sync: %w", err)
+	}
+	return nil
 }
 
 var ackMu sync.Mutex
