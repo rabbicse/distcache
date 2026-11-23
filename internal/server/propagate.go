@@ -431,7 +431,9 @@ func (s *Server) loadAOF(path string) error {
 			return fmt.Errorf("bad AOF preamble: %w", err)
 		}
 	}
-	fake := &Client{s: s, isMaster: true, proto: 2}
+	// The loader replays the server's own log, so it counts as authenticated;
+	// otherwise requirepass would make every replayed command fail with NOAUTH.
+	fake := &Client{s: s, isMaster: true, proto: 2, authed: true, user: "default"}
 	fake.writer = resp.NewWriter(nil, 2)
 	fake.name.Store("aof-loader")
 	fake.lastCmd.Store("")
@@ -449,6 +451,8 @@ func (s *Server) loadAOF(path string) error {
 		return n
 	}
 	cmds := 0
+	refused := 0
+	var firstRefusal string
 	var inMulti bool
 	lastGood := pos()    // end of the last complete command
 	var multiStart int64 // offset of the MULTI that opened the current block
@@ -480,8 +484,20 @@ func (s *Server) loadAOF(path string) error {
 			inMulti = false
 		}
 		s.processCommand(fake, args)
+		// The log holds only commands that succeeded once, so an error reply
+		// here means data is being dropped. Never let that pass silently.
+		if reply := fake.writer.Bytes(); len(reply) > 0 && reply[0] == '-' {
+			if refused == 0 {
+				firstRefusal = string(bytes.TrimRight(reply, "\r\n"))
+			}
+			refused++
+		}
 		fake.writer.Reset()
 		cmds++
+	}
+	if refused > 0 {
+		s.log.Error("AOF replay: commands were refused and their writes are missing from the dataset",
+			"refused", refused, "first_error", firstRefusal)
 	}
 	if inMulti {
 		// Unterminated transaction: discard it, like Redis does, and drop it
