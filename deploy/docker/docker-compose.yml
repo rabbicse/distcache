@@ -1,0 +1,63 @@
+# DistCache with Docker Compose.
+#
+#   export DISTCACHE_PASSWORD="$(openssl rand -base64 32)"
+#   docker compose -f deploy/docker/docker-compose.yml up -d                     # one node
+#   docker compose -f deploy/docker/docker-compose.yml --profile replica up -d   # plus a read-only replica
+#
+# The ports are published on 127.0.0.1 only. To reach the server from other
+# machines change "127.0.0.1:6379:6379" to "6379:6379" and keep the password.
+name: distcache
+
+services:
+  distcache:
+    image: ${DISTCACHE_IMAGE:-distcache:dev}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command:
+      - --dir
+      - /data
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${DISTCACHE_PASSWORD:?set DISTCACHE_PASSWORD to a long random string}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - distcache-data:/data
+    restart: unless-stopped
+    # Give the server time to persist when it is stopped.
+    stop_grace_period: 2m
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+
+  replica:
+    profiles: ["replica"]
+    image: ${DISTCACHE_IMAGE:-distcache:dev}
+    depends_on: [distcache]
+    command:
+      - --dir
+      - /data
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${DISTCACHE_PASSWORD:?set DISTCACHE_PASSWORD to a long random string}
+      - --masterauth
+      - ${DISTCACHE_PASSWORD:?set DISTCACHE_PASSWORD to a long random string}
+      - --replicaof
+      - distcache
+      - "6379"
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - distcache-replica-data:/data
+    restart: unless-stopped
+    stop_grace_period: 2m
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  distcache-data:
+  distcache-replica-data:

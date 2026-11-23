@@ -11,6 +11,7 @@ import (
 	"hash/crc64"
 	"io"
 	"math"
+	"slices"
 
 	"github.com/rabbicse/distcache/internal/ds"
 )
@@ -248,7 +249,8 @@ func DecodeValue(p []byte) (any, error) {
 		return nil, ErrBadSnapshot
 	}
 	data := body[:len(body)-2]
-	br := &byteReader{r: bufio.NewReader(&bytesReader{b: data}), crc: crc64.New(crcTable)}
+	src := &bytesReader{b: data}
+	br := &byteReader{r: bufio.NewReader(src), crc: crc64.New(crcTable), src: src}
 	t := br.byte1()
 	v := readValue(br, t)
 	if br.err != nil || v == nil {
@@ -287,6 +289,35 @@ type byteReader struct {
 	r   *bufio.Reader
 	crc hash.Hash64
 	err error
+	// src is the in-memory payload behind r when decoding a DUMP, so declared
+	// lengths can be checked against the bytes left; nil for streamed input.
+	src *bytesReader
+}
+
+// readChunk bounds each allocation when reading a streamed length-prefixed
+// value, so a forged length costs no more memory than the bytes that exist.
+const readChunk = 1 << 20
+
+// remaining reports the bytes left in an in-memory payload, or -1 when the
+// input is a stream of unknown length.
+func (b *byteReader) remaining() int64 {
+	if b.src == nil {
+		return -1
+	}
+	return int64(len(b.src.b)-b.src.i) + int64(b.r.Buffered())
+}
+
+// fits reports whether n more items of at least one byte each can still be
+// present in the input, recording ErrBadSnapshot when they cannot.
+func (b *byteReader) fits(n uint64) bool {
+	if b.err != nil {
+		return false
+	}
+	if r := b.remaining(); r >= 0 && n > uint64(r) {
+		b.err = ErrBadSnapshot
+		return false
+	}
+	return true
 }
 
 func (b *byteReader) ReadByte() (byte, error) {
@@ -305,10 +336,21 @@ func (b *byteReader) read(n uint64) []byte {
 		b.err = errors.New("snapshot: length too large")
 		return nil
 	}
-	buf := make([]byte, n)
-	if _, err := io.ReadFull(b.r, buf); err != nil {
-		b.err = err
+	if !b.fits(n) {
 		return nil
+	}
+	// Grow in bounded chunks so a declared length the stream cannot satisfy
+	// never turns into one large allocation.
+	buf := make([]byte, 0, min(n, readChunk))
+	for uint64(len(buf)) < n {
+		k := min(n-uint64(len(buf)), readChunk)
+		buf = slices.Grow(buf, int(k))
+		chunk := buf[len(buf) : len(buf)+int(k)]
+		if _, err := io.ReadFull(b.r, chunk); err != nil {
+			b.err = err
+			return nil
+		}
+		buf = buf[:len(buf)+int(k)]
 	}
 	b.crc.Write(buf)
 	return buf
@@ -490,9 +532,15 @@ func readStream(br *byteReader) *ds.Stream {
 			br.err = ErrBadSnapshot
 			return nil
 		}
-		f := make([][]byte, nf)
-		for j := range f {
-			f[j] = br.bytes()
+		if !br.fits(nf) {
+			return nil
+		}
+		f := make([][]byte, 0, min(nf, 1024))
+		for j := uint64(0); j < nf && br.err == nil; j++ {
+			f = append(f, br.bytes())
+		}
+		if br.err != nil {
+			return nil
 		}
 		s.Append(id, f)
 	}

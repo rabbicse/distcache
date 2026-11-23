@@ -21,12 +21,14 @@ import (
 	"github.com/rabbicse/distcache/internal/storage"
 )
 
-// Version is the DistCache version. RedisVersion is the Redis version whose
-// command set and replies DistCache implements (reported to clients).
-const (
-	Version      = "1.0.0"
-	RedisVersion = "8.4.0"
-)
+// Version is the DistCache version. It is a variable so release builds can
+// set it with -ldflags "-X .../internal/server.Version=x.y.z" (see
+// scripts/release.sh).
+var Version = "1.0.0"
+
+// RedisVersion is the Redis version whose command set and replies DistCache
+// implements (reported to clients).
+const RedisVersion = "8.4.0"
 
 type stats struct {
 	commands          atomic.Int64
@@ -97,6 +99,16 @@ type Server struct {
 	pauseMu      sync.RWMutex
 	pauseEnd     atomic.Int64
 	pauseAll     atomic.Bool
+
+	// execGate is read-held by every client command while it executes;
+	// shutdown write-locks it to wait for in-flight commands before the final
+	// save, so no write is acknowledged after the save point.
+	execGate sync.RWMutex
+	// execStopped is set while shutdown waits for or holds execGate: client
+	// commands are refused (their connection closes without a reply) and
+	// blocked clients give up.
+	execStopped atomic.Bool
+	shutdownMu  sync.Mutex // serialises shutdown attempts (SHUTDOWN may abort)
 
 	done     chan struct{}
 	doneOnce sync.Once
@@ -254,6 +266,9 @@ func (s *Server) acceptLoop(ln net.Listener) error {
 			return err
 		}
 		s.stats.connections.Add(1)
+		if s.rejectProtected(conn) {
+			continue
+		}
 		s.clientsMu.RLock()
 		n := int64(len(s.clients))
 		s.clientsMu.RUnlock()
@@ -277,8 +292,31 @@ func (s *Server) acceptLoop(ln net.Listener) error {
 
 // Shutdown stops accepting connections, optionally saves, and closes all
 // clients.
-func (s *Server) Shutdown(save bool) error {
+func (s *Server) Shutdown(save bool) error { return s.shutdown(save, false) }
+
+// shutdown stops command execution, waits for in-flight commands, saves when
+// save is set, then flushes and closes the AOF and closes every connection,
+// so every acknowledged write is persisted. With abortOnSaveErr (SHUTDOWN) a
+// failed save resumes execution and returns the error instead.
+func (s *Server) shutdown(save, abortOnSaveErr bool) error {
+	s.shutdownMu.Lock()
+	defer s.shutdownMu.Unlock()
+	if s.closing.Load() {
+		return nil
+	}
+	s.stopExecution()
+	defer s.execGate.Unlock()
 	var err error
+	if save {
+		if e := s.saveSync(); e != nil {
+			s.log.Warn("error saving on shutdown", "err", e)
+			if abortOnSaveErr {
+				s.execStopped.Store(false)
+				return e
+			}
+			err = e
+		}
+	}
 	s.doneOnce.Do(func() {
 		s.closing.Store(true)
 		s.lnMu.Lock()
@@ -287,12 +325,6 @@ func (s *Server) Shutdown(save bool) error {
 		}
 		s.lnMu.Unlock()
 		s.replication.stop()
-		if save {
-			if e := s.saveSync(); e != nil {
-				err = e
-				s.log.Warn("error saving on shutdown", "err", e)
-			}
-		}
 		s.propagator.closeAOF()
 		close(s.done)
 		s.clientsMu.RLock()
@@ -310,6 +342,43 @@ func (s *Server) Shutdown(save bool) error {
 	})
 	return err
 }
+
+// stopExecution refuses new client commands and returns once every in-flight
+// one has finished, holding execGate for writing. Blocked clients are woken
+// to give up and running scripts are killed, so neither can stall shutdown.
+func (s *Server) stopExecution() {
+	s.execStopped.Store(true)
+	locked := make(chan struct{})
+	go func() {
+		s.execGate.Lock()
+		close(locked)
+	}()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		s.blocker.signalAll()
+		s.scripts.killAll()
+		select {
+		case <-locked:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// beginCommand admits one client command, holding execGate for reading until
+// endCommand. It returns false once shutdown has stopped execution.
+func (s *Server) beginCommand() bool {
+	s.execGate.RLock()
+	if s.execStopped.Load() {
+		s.execGate.RUnlock()
+		return false
+	}
+	return true
+}
+
+// endCommand ends a command admitted by beginCommand.
+func (s *Server) endCommand() { s.execGate.RUnlock() }
 
 // cron runs periodic tasks: clock update, active expiry, stats, auto-save,
 // client timeouts and replication heartbeats.

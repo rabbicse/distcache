@@ -16,7 +16,7 @@ import (
 const errInvalidStreamID = "-ERR Invalid stream ID specified as stream command argument"
 
 // streamScript covers the stream commands with time-independent steps.
-var streamScript = concat(streamAddScript, streamTrimScript, streamGroupScript)
+var streamScript = concat(streamAddScript, streamTrimScript, streamGroupScript, streamAutoClaimScript)
 
 var streamAddScript = []testutil.Step{
 	testutil.S(`"1-1"`, "XADD", "s", "1-1", "f", "a"),
@@ -143,6 +143,27 @@ var streamGroupScript = []testutil.Step{
 	testutil.S(":0", "XGROUP", "DESTROY", "g", "late"),
 	testutil.S(wrongType, "XGROUP", "CREATE", "str", "grp", "0"),
 	testutil.S(wrongType, "XREAD", "STREAMS", "str", "0"),
+}
+
+// streamAutoClaimScript checks that XAUTOCLAIM's COUNT bounds the reply
+// (claimed plus deleted entries) and that the cursor resumes after it.
+var streamAutoClaimScript = []testutil.Step{
+	testutil.S(`"1-1"`, "XADD", "ac", "1-1", "f", "v"),
+	testutil.S(`"2-1"`, "XADD", "ac", "2-1", "f", "v"),
+	testutil.S(`"3-1"`, "XADD", "ac", "3-1", "f", "v"),
+	testutil.S(`"4-1"`, "XADD", "ac", "4-1", "f", "v"),
+	testutil.S(`"5-1"`, "XADD", "ac", "5-1", "f", "v"),
+	testutil.S(`"6-1"`, "XADD", "ac", "6-1", "f", "v"),
+	testutil.S(`"7-1"`, "XADD", "ac", "7-1", "f", "v"),
+	testutil.S("+OK", "XGROUP", "CREATE", "ac", "grp", "0"),
+	testutil.S(`*[*["ac", *[*["1-1", *["f", "v"]], *["2-1", *["f", "v"]], *["3-1", *["f", "v"]], *["4-1", *["f", "v"]], *["5-1", *["f", "v"]], *["6-1", *["f", "v"]], *["7-1", *["f", "v"]]]]]`, "XREADGROUP", "GROUP", "grp", "c1", "STREAMS", "ac", ">"),
+	testutil.S(`*["3-1", *["1-1", "2-1"], *[]]`, "XAUTOCLAIM", "ac", "grp", "c2", "0", "0", "COUNT", "2", "JUSTID"),
+	testutil.S(":3", "XDEL", "ac", "1-1", "2-1", "4-1"),
+	testutil.S(`*["3-1", *[], *["1-1", "2-1"]]`, "XAUTOCLAIM", "ac", "grp", "c2", "0", "0", "COUNT", "2", "JUSTID"),
+	testutil.S(`*["5-1", *["3-1"], *["4-1"]]`, "XAUTOCLAIM", "ac", "grp", "c2", "0", "3-1", "COUNT", "2", "JUSTID"),
+	testutil.S(`*["7-1", *["5-1", "6-1"], *[]]`, "XAUTOCLAIM", "ac", "grp", "c2", "0", "5-1", "COUNT", "2", "JUSTID"),
+	testutil.S(`*["0-0", *["6-1", "7-1"], *[]]`, "XAUTOCLAIM", "ac", "grp", "c2", "0", "6-1", "COUNT", "2", "JUSTID"),
+	testutil.S(`*[:4, "3-1", "7-1", *[*["c2", "4"]]]`, "XPENDING", "ac", "grp"),
 }
 
 func TestStreamCommands(t *testing.T) {

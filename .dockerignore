@@ -1,4 +1,15 @@
-bin/
-coverage.*
+# Keep the Docker build context to what the image build needs.
 .git
+.github
+.claude
+.superpowers
+bin
+dist
+bench
 docs
+examples
+test
+web
+coverage.*
+**/*.dcs
+**/*.aof

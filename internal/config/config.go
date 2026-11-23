@@ -67,6 +67,10 @@ type Config struct {
 	maxClientsStr   string
 	clientOutputStr string
 	saveSeen        bool
+	// enableProtected is enable-protected-configs: "no", "yes" or "local".
+	enableProtected string
+	// enableDebug is enable-debug-command: "no", "yes" or "local".
+	enableDebug string
 
 	// Web console settings (static, guarded by mu).
 	WebPort           int           // web-port: 0 disables the console
@@ -115,6 +119,7 @@ type Config struct {
 	StopWritesOnBgsave  atomic.Bool
 	LazyFreeUserDel     atomic.Bool
 	RequirePassSet      atomic.Bool
+	ProtectedMode       atomic.Bool // protected-mode: without a password, loopback peers only
 	BusyReplyThreshold  atomic.Int64
 	ClientQueryBufLimit atomic.Int64
 
@@ -127,6 +132,9 @@ type param struct {
 	get     func(c *Config) string
 	set     func(c *Config, v string) error
 	mutable bool
+	// protected params can be set at startup but CONFIG SET refuses them
+	// unless enable-protected-configs allows the connection.
+	protected bool
 }
 
 // Keyspace notification flag bits.
@@ -229,6 +237,8 @@ func Default() *Config {
 		Port:              6379,
 		Dir:               ".",
 		DBFilename:        "dump.dcs",
+		enableProtected:   "no",
+		enableDebug:       "no",
 		AppendFilename:    "appendonly.aof",
 		AppendFsync:       "everysec",
 		Save:              [][2]int64{{3600, 1}, {300, 100}, {60, 10000}},
@@ -253,6 +263,7 @@ func Default() *Config {
 	c.LFULogFactor.Store(10)
 	c.LFUDecayTime.Store(1)
 	c.ActiveExpire.Store(true)
+	c.ProtectedMode.Store(true)
 	c.HashMaxEntries.Store(128)
 	c.HashMaxValue.Store(64)
 	c.SetMaxIntset.Store(512)
@@ -305,7 +316,9 @@ func ParseMemory(v string) (int64, error) {
 		}
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || n < 0 {
+	// Reject values whose byte count overflows int64 rather than wrapping
+	// to a negative size that CONFIG REWRITE would then persist.
+	if err != nil || n < 0 || n > math.MaxInt64/mul {
 		return 0, errors.New("argument must be a memory value")
 	}
 	return n * mul, nil
@@ -364,7 +377,7 @@ func (c *Config) add(name string, mutable bool, get func(*Config) string, set fu
 }
 
 // ignoredParams are accepted for redis.conf compatibility but have no effect.
-var ignoredParams = []string{"protected-mode", "daemonize", "supervised", "tcp-backlog", "io-threads",
+var ignoredParams = []string{"daemonize", "supervised", "tcp-backlog", "io-threads",
 	"io-threads-do-reads", "always-show-logo", "set-proc-title", "rdbcompression", "rdbchecksum",
 	"rdb-del-sync-files", "stop-writes-on-bgsave-error-ignored", "replica-serve-stale-data",
 	"repl-diskless-sync", "repl-diskless-sync-delay", "repl-diskless-load", "repl-disable-tcp-nodelay",
@@ -375,8 +388,7 @@ var ignoredParams = []string{"protected-mode", "daemonize", "supervised", "tcp-b
 	"latency-monitor-threshold", "list-compress-depth", "stream-node-max-bytes",
 	"stream-node-max-entries", "activerehashing", "dynamic-hz", "aof-rewrite-incremental-fsync",
 	"rdb-save-incremental-fsync", "jemalloc-bg-thread", "activedefrag", "crash-log-enabled",
-	"crash-memcheck-enabled", "syslog-enabled", "syslog-ident", "syslog-facility", "enable-debug-command",
-	"enable-module-command", "enable-protected-configs", "locale-collate", "appenddirname",
+	"crash-memcheck-enabled", "syslog-enabled", "syslog-ident", "syslog-facility", "enable-module-command", "locale-collate", "appenddirname",
 	"cluster-enabled", "tls-port", "acllog-max-len", "tracking-table-max-keys", "active-expire-effort",
 	"close-on-oom", "unixsocketperm", "propagation-error-behavior", "lua-replicate-commands",
 	"client-query-buffer-limit-ignored", "replica-announced", "maxmemory-clients", "maxmemory-eviction-tenacity"}
@@ -413,8 +425,38 @@ func (c *Config) registerParams() {
 		})
 	c.registerWebParams()
 	c.strParam("dir", true, &c.Dir)
-	c.strParam("dbfilename", true, &c.DBFilename)
+	c.add("dbfilename", true, func(c *Config) string { return c.DBFilename },
+		func(c *Config, v string) error {
+			if strings.ContainsAny(v, `/\`) {
+				return errors.New("dbfilename can't be a path, just a filename")
+			}
+			c.DBFilename = v
+			return nil
+		})
 	c.strParam("appendfilename", false, &c.AppendFilename)
+	c.add("enable-debug-command", false, func(c *Config) string { return c.enableDebug },
+		func(c *Config, v string) error {
+			switch v = strings.ToLower(v); v {
+			case "no", "yes", "local":
+				c.enableDebug = v
+				return nil
+			}
+			return errors.New("argument(s) must be one of the following: no, yes, local")
+		})
+	c.add("enable-protected-configs", false, func(c *Config) string { return c.enableProtected },
+		func(c *Config, v string) error {
+			switch v = strings.ToLower(v); v {
+			case "no", "yes", "local":
+				c.enableProtected = v
+				return nil
+			}
+			return errors.New("argument(s) must be one of the following: no, yes, local")
+		})
+	// Writing the snapshot to an arbitrary path is a well-known way to plant
+	// files, so these follow Redis's PROTECTED_CONFIG.
+	for _, n := range []string{"dir", "dbfilename", "appendfilename"} {
+		c.params[n].protected = true
+	}
 	c.strParam("logfile", false, &c.LogFile)
 	c.strParam("pidfile", false, &c.PidFile)
 	c.strParam("unixsocket", false, &c.UnixSocket)
@@ -438,6 +480,7 @@ func (c *Config) registerParams() {
 			return errors.New("argument(s) must be one of the following: always, everysec, no")
 		})
 	c.boolParam("appendonly", &c.AppendOnly)
+	c.boolParam("protected-mode", &c.ProtectedMode)
 	c.add("save", true, func(c *Config) string {
 		parts := []string{}
 		for _, s := range c.Save {
@@ -592,6 +635,29 @@ func (c *Config) Set(name, value string, startup bool) error {
 	return nil
 }
 
+// EnableDebugCommand returns enable-debug-command: "no", "yes" or "local"
+// (allowed for connections from this host only). It is fixed at startup.
+func (c *Config) EnableDebugCommand() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.enableDebug
+}
+
+// SetFromClient is CONFIG SET from a connection: it refuses protected params
+// unless enable-protected-configs is yes, or local and the connection is
+// local. arg is the name as the client gave it, for the error text.
+func (c *Config) SetFromClient(arg, value string, local bool) error {
+	if p, ok := c.params[strings.ToLower(arg)]; ok && p.protected {
+		c.mu.RLock()
+		mode := c.enableProtected
+		c.mu.RUnlock()
+		if mode != "yes" && (mode != "local" || !local) {
+			return fmt.Errorf("CONFIG SET failed (possibly related to argument '%s') - can't set protected config", arg)
+		}
+	}
+	return c.Set(arg, value, false)
+}
+
 // Get returns name/value pairs matching a glob pattern.
 func (c *Config) Get(pattern string) [][2]string {
 	c.mu.RLock()
@@ -663,6 +729,11 @@ func (c *Config) loadFile(path string) error {
 func (c *Config) applyDirective(args []string) error {
 	name := strings.ToLower(args[0])
 	val := strings.Join(args[1:], " ")
+	if name == "rename-command" && len(args) == 3 && args[2] == "" {
+		// Joining would lose the empty new name that disables a command;
+		// the setter strips these quotes back off.
+		val = args[1] + ` ""`
+	}
 	if name == "save" && !c.saveSeen {
 		c.saveSeen = true
 		c.Save = nil
@@ -729,31 +800,84 @@ func (c *Config) Rewrite() error {
 	if c.ConfigFile == "" {
 		return ErrNoConfigFile
 	}
-	pairs := c.Get("*")
-	var b strings.Builder
-	b.WriteString("# Generated by DistCache CONFIG REWRITE\n")
-	for _, p := range pairs {
+	// lines maps each managed parameter to its rewritten line ("" omits it).
+	lines := map[string]string{}
+	var names []string
+	for _, p := range c.Get("*") {
 		// Like Redis, rewrite only the canonical name of an alias.
-		if p[0] == "slaveof" || p[0] == "lua-time-limit" || strings.Contains(p[0], "ziplist") {
+		if rewriteCanonical(p[0]) != p[0] {
 			continue
 		}
-		if p[1] == "" && p[0] != "save" {
+		names = append(names, p[0])
+		switch {
+		case p[0] == "save" && p[1] == "":
+			lines[p[0]] = `save ""`
+		case p[1] != "":
+			lines[p[0]] = p[0] + " " + strconv.Quote(p[1])
+		default:
+			lines[p[0]] = ""
+		}
+	}
+	old, err := os.ReadFile(c.ConfigFile)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// Like Redis's rewriteConfig, keep every line this does not manage
+	// (comments, include, rename-command...) and update managed ones in
+	// place, then append the parameters the file did not mention.
+	const marker = "# Generated by DistCache CONFIG REWRITE"
+	var b strings.Builder
+	written := map[string]bool{}
+	hasMarker := false
+	for _, line := range strings.SplitAfter(string(old), "\n") {
+		if line == "" {
 			continue
 		}
-		b.WriteString(p[0])
-		b.WriteByte(' ')
-		if p[0] == "save" && p[1] == "" {
-			b.WriteString(`""`)
-		} else {
-			b.WriteString(strconv.Quote(p[1]))
+		trimmed := strings.TrimSpace(line)
+		hasMarker = hasMarker || trimmed == marker
+		args, ok := resp.SplitArgs(trimmed)
+		if trimmed == "" || trimmed[0] == '#' || !ok || len(args) == 0 {
+			b.WriteString(strings.TrimSuffix(line, "\n") + "\n")
+			continue
 		}
-		b.WriteByte('\n')
+		name := rewriteCanonical(strings.ToLower(args[0]))
+		repl, managed := lines[name]
+		if !managed {
+			b.WriteString(strings.TrimSuffix(line, "\n") + "\n")
+			continue
+		}
+		if !written[name] && repl != "" {
+			b.WriteString(repl + "\n")
+		}
+		written[name] = true
+	}
+	for _, n := range names {
+		if written[n] || lines[n] == "" {
+			continue
+		}
+		if !hasMarker {
+			b.WriteString(marker + "\n")
+			hasMarker = true
+		}
+		b.WriteString(lines[n] + "\n")
 	}
 	tmp := c.ConfigFile + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, c.ConfigFile)
+}
+
+// rewriteCanonical maps a legacy alias to the parameter name CONFIG REWRITE
+// writes for it.
+func rewriteCanonical(name string) string {
+	switch name {
+	case "slaveof":
+		return "replicaof"
+	case "lua-time-limit":
+		return "busy-reply-threshold"
+	}
+	return strings.Replace(name, "ziplist", "listpack", 1)
 }
 
 // registerWebParams registers the static web console parameters.

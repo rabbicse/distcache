@@ -110,9 +110,16 @@ func cmdSet(c *Ctx) {
 		}
 	}
 	_ = expUnit
-	old, e, ok := c.getStr(key)
-	if !ok {
-		return
+	// Only GET cares what the key holds; a plain SET replaces any type.
+	var old []byte
+	e := c.Lookup(key)
+	if get && e != nil {
+		b, isStr := e.Value.([]byte)
+		if !isStr {
+			c.WrongType()
+			return
+		}
+		old = b
 	}
 	if (nx && e != nil) || (xx && e == nil) {
 		if get {
@@ -424,7 +431,7 @@ func cmdSetRange(c *Ctx) {
 		c.W.WriteInt(int64(len(v)))
 		return
 	}
-	if off+int64(len(val)) > maxStringSize {
+	if off > maxStringSize-int64(len(val)) { // written this way so a huge offset cannot overflow
 		c.Err("ERR string exceeds maximum allowed size (proto-max-bulk-len)")
 		return
 	}

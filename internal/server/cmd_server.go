@@ -3,6 +3,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"os"
@@ -78,7 +80,10 @@ func (s *Server) checkPassword(user, pass string) bool {
 	if rp == "" {
 		return true
 	}
-	return pass == rp
+	// Compare digests in constant time, so the reply time reveals neither how
+	// much of the password matched nor its length.
+	want, got := sha256.Sum256([]byte(rp)), sha256.Sum256([]byte(pass))
+	return subtle.ConstantTimeCompare(want[:], got[:]) == 1
 }
 
 func cmdAuth(c *Ctx) {
@@ -563,7 +568,7 @@ func cmdConfig(c *Ctx) {
 		}
 		for i := 2; i < len(c.Args); i += 2 {
 			name := strings.ToLower(c.Arg(i))
-			if err := cfg.Set(name, c.Arg(i+1), false); err != nil {
+			if err := cfg.SetFromClient(c.Arg(i), c.Arg(i+1), c.client.isLocal()); err != nil {
 				c.Err("ERR " + err.Error())
 				return
 			}
@@ -703,16 +708,15 @@ func cmdShutdown(c *Ctx) {
 			return
 		}
 	}
-	if save && !c.server.cfg.AppendOnly.Load() {
-		if err := c.server.saveSync(); err != nil {
-			c.Err("ERR Errors trying to SHUTDOWN. Check logs.")
-			return
-		}
+	save = save && !c.server.cfg.AppendOnly.Load()
+	if c.client == nil {
+		go func() { _ = c.server.Shutdown(save) }()
+		return
 	}
-	go func() { _ = c.server.Shutdown(false) }()
-	if c.client != nil {
-		c.client.closeAfterReply = true
-	}
+	// The shutdown waits for in-flight commands, this one included, so the
+	// client loop runs it after this command (see serveClient).
+	c.client.shutdownReq = true
+	c.client.shutdownSave = save
 }
 
 func cmdMonitor(c *Ctx) {
@@ -901,7 +905,23 @@ func cmdACL(c *Ctx) {
 	}
 }
 
+// errDebugNotAllowed is Redis's reply when enable-debug-command refuses DEBUG.
+const errDebugNotAllowed = `ERR DEBUG command not allowed. If the enable-debug-command option is set to "local", ` +
+	`you can run it from a local connection, otherwise you need to set this option in the configuration file, ` +
+	`and then restart the server.`
+
+// cmdDebug implements DEBUG. Its subcommands can stall, crash or reload the
+// server, so enable-debug-command must allow the connection first. The
+// command is registered no_multi: DIGEST and RELOAD lock every shard
+// themselves and would deadlock inside EXEC, which already holds locks.
 func cmdDebug(c *Ctx) {
+	switch mode := c.server.cfg.EnableDebugCommand(); {
+	case mode == "yes":
+	case mode == "local" && c.client.isLocal():
+	default:
+		c.Err(errDebugNotAllowed)
+		return
+	}
 	switch strings.ToLower(c.Arg(1)) {
 	case "panic":
 		// Deliberate crash used by resilience tests; invokeHandler recovers it

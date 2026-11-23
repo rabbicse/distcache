@@ -18,6 +18,10 @@ jobs:
         run: GOTOOLCHAIN=go1.27.3 CGO_ENABLED=0 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
       - name: Lint
         run: golangci-lint run ./...
+      - name: Command reference is up to date
+        run: |
+          make docs-commands
+          git diff --exit-code docs/commands.md
 
   test-linux:
     runs-on: ubuntu-latest
@@ -57,10 +61,41 @@ jobs:
         run: |
           make test
           make test-e2e
-      # Windows support is deferred: it only has to compile and vet.
       - name: Build and vet (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
           go build ./...
           go vet ./...
+      # Windows binaries are shipped as a preview. The tests run so problems
+      # are visible, but they do not block a merge yet.
+      - name: Test (Windows, informational)
+        if: matrix.os == 'windows-latest'
+        continue-on-error: true
+        shell: bash
+        run: go test -count=1 ./...
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.27.x
+      - name: Release archives build for every platform
+        run: make dist
+      - name: Container image builds and answers
+        run: |
+          make docker
+          docker run -d --name dc -p 6379:6379 distcache:dev
+          make build
+          for i in $(seq 1 20); do
+            if bin/distcache-bench -p 6379 -c 1 -n 1 -t ping -q; then exit 0; fi
+            sleep 0.5
+          done
+          docker logs dc
+          exit 1
+      - name: Kubernetes manifests render
+        run: |
+          kubectl kustomize deploy/kubernetes/base >/dev/null
+          kubectl kustomize deploy/kubernetes/overlays/replication >/dev/null

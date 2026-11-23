@@ -986,7 +986,7 @@ func sortGeneric(c *Ctx, ro bool) {
 		start = n
 	}
 	end := n
-	if count >= 0 && start+count < n {
+	if count >= 0 && count < n-start { // written this way so a huge count cannot overflow
 		end = start + count
 	}
 	items = items[start:end]

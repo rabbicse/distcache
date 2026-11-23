@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rabbicse/distcache/internal/resp"
@@ -37,6 +38,9 @@ type propagator struct {
 	aofBuf    []byte
 	aofSignal chan struct{}
 	aofErr    error
+	// aofErrMsg mirrors aofErr for the lock-free MISCONF check on the
+	// command path; nil while the AOF is healthy.
+	aofErrMsg atomic.Pointer[string]
 	aofSize   int64
 	lastFsync time.Time
 	rewrite   *bytes.Buffer
@@ -156,11 +160,12 @@ func (p *propagator) writeAOF(buf []byte) {
 		if len(p.aofBuf) > 0 {
 			p.flushAOFLocked()
 		}
-		if _, err := p.aofFile.Write(buf); err != nil {
-			p.aofErr = err
+		n, err := p.aofFile.Write(buf)
+		if err == nil {
+			err = p.aofFile.Sync()
 		}
-		_ = p.aofFile.Sync()
-		p.aofSize += int64(len(buf))
+		p.aofSize += int64(n)
+		p.setAOFErrLocked(err)
 		return
 	}
 	p.aofBuf = append(p.aofBuf, buf...)
@@ -177,8 +182,10 @@ func (p *propagator) flushAOFLocked() {
 	n, err := p.aofFile.Write(p.aofBuf)
 	p.aofSize += int64(n)
 	if err != nil {
-		p.aofErr = err
-		p.server.log.Warn("error writing to the AOF file", "err", err)
+		// Cleared only once a later write is fsynced (setAOFErrLocked(nil)).
+		p.setAOFErrLocked(err)
+	} else if p.server.cfg.AppendFsync == "no" {
+		p.setAOFErrLocked(nil)
 	}
 	if cap(p.aofBuf) > 4<<20 {
 		p.aofBuf = nil
@@ -207,7 +214,13 @@ func (p *propagator) aofWriter() {
 			fsync := p.server.cfg.AppendFsync == "everysec"
 			p.mu.Unlock()
 			if f != nil && fsync {
-				_ = f.Sync()
+				err := f.Sync()
+				p.mu.Lock()
+				// Clear a recorded error only if nothing failed to reach f.
+				if p.aofFile == f && (err != nil || len(p.aofBuf) == 0) {
+					p.setAOFErrLocked(err)
+				}
+				p.mu.Unlock()
 			}
 		}
 	}
@@ -220,10 +233,42 @@ func (p *propagator) closeAOF() {
 	defer p.mu.Unlock()
 	if p.aofFile != nil {
 		p.flushAOFLocked()
-		_ = p.aofFile.Sync()
-		_ = p.aofFile.Close()
+		if err := errors.Join(p.aofFile.Sync(), p.aofFile.Close()); err != nil {
+			p.server.log.Warn("closing the AOF failed", "err", err)
+		}
 		p.aofFile = nil
 	}
+	// With the AOF off its write state no longer gates writes.
+	p.setAOFErrLocked(nil)
+}
+
+// setAOFErrLocked records the outcome of an AOF write or fsync: an error
+// makes write commands fail with MISCONF until a later write reaches the disk,
+// like Redis' aof_last_write_status. p.mu must be held.
+func (p *propagator) setAOFErrLocked(err error) {
+	if err == nil {
+		if p.aofErr != nil {
+			p.server.log.Info("AOF write error state cleared")
+		}
+		p.aofErr = nil
+		p.aofErrMsg.Store(nil)
+		return
+	}
+	if p.aofErr == nil {
+		p.server.log.Warn("error writing to the AOF file", "err", err)
+	}
+	p.aofErr = err
+	msg := err.Error()
+	p.aofErrMsg.Store(&msg)
+}
+
+// aofWriteError returns the last AOF write or fsync error message, or "" when
+// the AOF is healthy. It is lock-free for the command path.
+func (p *propagator) aofWriteError() string {
+	if m := p.aofErrMsg.Load(); m != nil {
+		return *m
+	}
+	return ""
 }
 
 func (p *propagator) aofStats() (size int64, enabled bool, err error) {
@@ -272,19 +317,7 @@ func (s *Server) rewriteAOF() error {
 					err = f.Sync()
 				}
 				if err == nil {
-					err = os.Rename(tmp, p.aofPath())
-				}
-				if err == nil {
-					if p.aofFile != nil {
-						p.flushAOFLocked()
-						_ = p.aofFile.Close()
-					}
-					p.aofFile = f
-					st, _ := f.Stat()
-					if st != nil {
-						p.aofSize = st.Size()
-					}
-					p.writerOnce.Do(func() { go p.aofWriter() })
+					err = p.swapAOFLocked(f, tmp)
 				}
 				p.rewrite = nil
 				p.mu.Unlock()
@@ -315,7 +348,7 @@ func (s *Server) rewriteAOF() error {
 	if !s.cfg.AppendOnly.Load() {
 		// Rewrite requested while AOF is off: keep the file but stop logging.
 		p.mu.Lock()
-		if p.aofFile == f {
+		if f := p.aofFile; f != nil {
 			p.aofFile = nil
 			if cerr := f.Close(); cerr != nil {
 				s.log.Warn("closing AOF after rewrite failed", "err", cerr)
@@ -327,6 +360,51 @@ func (s *Server) rewriteAOF() error {
 	s.stats.lastAofRewriteOK.Store(true)
 	s.log.Info("Background AOF rewrite finished successfully")
 	return nil
+}
+
+// swapAOFLocked installs the finished rewrite tmp (written through f) as the
+// AOF. Every handle on either file is closed before the rename, which Windows
+// requires, and the AOF is reopened for appending afterwards. p.mu is held
+// throughout, so no write can land between the two files: the bytes still
+// buffered for the old file are already part of the rewrite.
+func (p *propagator) swapAOFLocked(f *os.File, tmp string) error {
+	if err := f.Close(); err != nil {
+		return err
+	}
+	hadOld := p.aofFile != nil
+	if hadOld {
+		p.flushAOFLocked()
+		if err := p.aofFile.Close(); err != nil {
+			p.server.log.Warn("closing the old AOF failed", "err", err)
+		}
+		p.aofFile = nil
+	}
+	path := p.aofPath()
+	renameErr := os.Rename(tmp, path)
+	if renameErr == nil {
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			p.server.log.Warn("fsync of the AOF directory failed", "err", err)
+		}
+	} else if !hadOld {
+		return renameErr
+	}
+	// After a failed rename the old file is reopened, so logging carries on
+	// where it was.
+	nf, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		p.setAOFErrLocked(err)
+		p.server.log.Warn("reopening the AOF failed, AOF logging stopped", "err", err)
+		return errors.Join(renameErr, err)
+	}
+	p.aofFile = nf
+	if st, err := nf.Stat(); err == nil {
+		p.aofSize = st.Size()
+	}
+	if renameErr == nil {
+		p.setAOFErrLocked(nil) // the new file was written and fsynced
+	}
+	p.writerOnce.Do(func() { go p.aofWriter() })
+	return renameErr
 }
 
 // loadAOF replays the append-only file.
@@ -353,47 +431,85 @@ func (s *Server) loadAOF(path string) error {
 			return fmt.Errorf("bad AOF preamble: %w", err)
 		}
 	}
-	fake := &Client{s: s, isMaster: true, proto: 2}
+	// The loader replays the server's own log, so it counts as authenticated;
+	// otherwise requirepass would make every replayed command fail with NOAUTH.
+	fake := &Client{s: s, isMaster: true, proto: 2, authed: true, user: "default"}
 	fake.writer = resp.NewWriter(nil, 2)
 	fake.name.Store("aof-loader")
 	fake.lastCmd.Store("")
 	r := resp.NewReader(br, 1<<16)
 	r.MaxBulkLen = resp.Unlimited
 	r.MaxMultiBulk = resp.Unlimited
+	// pos is the file offset of the next unparsed byte. r normally wraps br
+	// itself (bufio returns a large enough reader unchanged), in which case
+	// its buffer must not be counted twice.
+	pos := func() int64 {
+		n := cr.n - int64(br.Buffered())
+		if r.Underlying() != br {
+			n -= int64(r.Buffered())
+		}
+		return n
+	}
 	cmds := 0
+	refused := 0
+	var firstRefusal string
 	var inMulti bool
-	lastGood := cr.n - int64(br.Buffered())
+	lastGood := pos()    // end of the last complete command
+	var multiStart int64 // offset of the MULTI that opened the current block
 	for {
 		args, err := r.ReadCommand()
-		if err == io.EOF {
+		if err == io.EOF && pos() == lastGood {
 			break
 		}
 		if err != nil {
-			if errors.Is(err, io.ErrUnexpectedEOF) {
-				s.log.Warn("AOF truncated, discarding incomplete tail", "valid_bytes", lastGood)
-				_ = os.Truncate(path, lastGood)
-				break
+			// Any EOF past lastGood, even inside a "*N" or "$N" header, is a
+			// tail cut by a crash.
+			if err != io.EOF && !errors.Is(err, io.ErrUnexpectedEOF) {
+				return fmt.Errorf("bad AOF format: %w", err)
 			}
-			return fmt.Errorf("bad AOF format: %w", err)
+			s.log.Warn("AOF truncated, discarding incomplete tail", "valid_bytes", lastGood)
+			break
 		}
-		lastGood = cr.n - int64(br.Buffered()) - int64(r.Buffered())
-		if args == nil {
+		start := lastGood
+		lastGood = pos()
+		if len(args) == 0 {
 			continue
 		}
 		name := string(bytes.ToLower(args[0]))
 		switch name {
 		case "multi":
 			inMulti = true
+			multiStart = start
 		case "exec":
 			inMulti = false
 		}
 		s.processCommand(fake, args)
+		// The log holds only commands that succeeded once, so an error reply
+		// here means data is being dropped. Never let that pass silently.
+		if reply := fake.writer.Bytes(); len(reply) > 0 && reply[0] == '-' {
+			if refused == 0 {
+				firstRefusal = string(bytes.TrimRight(reply, "\r\n"))
+			}
+			refused++
+		}
 		fake.writer.Reset()
 		cmds++
 	}
+	if refused > 0 {
+		s.log.Error("AOF replay: commands were refused and their writes are missing from the dataset",
+			"refused", refused, "first_error", firstRefusal)
+	}
 	if inMulti {
-		// Unterminated transaction: discard it, like Redis does.
+		// Unterminated transaction: discard it, like Redis does, and drop it
+		// from the file so later appends are not swallowed into it.
 		fake.multi = nil
+		s.log.Warn("AOF ends inside MULTI, reverting the incomplete transaction", "valid_bytes", multiStart)
+		lastGood = multiStart
+	}
+	if st, err := f.Stat(); err == nil && st.Size() > lastGood {
+		if err := os.Truncate(path, lastGood); err != nil {
+			return fmt.Errorf("truncating AOF tail: %w", err)
+		}
 	}
 	s.log.Info("DB loaded from append only file", "preamble_keys", keys, "commands", cmds)
 	return nil

@@ -22,6 +22,9 @@ import (
 // zero (block forever), which an in-process caller could never wake.
 var ErrWouldBlock = errors.New("exec: blocking command with zero timeout")
 
+// errShuttingDown is returned by Session.Exec once shutdown stopped execution.
+var errShuttingDown = errors.New("exec: server is shutting down")
+
 // syncBuf is a bytes.Buffer safe for the push goroutine (writer, under the
 // client's wmu) and Session.Exec (reader) to use concurrently.
 type syncBuf struct {
@@ -117,7 +120,19 @@ func (ss *Session) Exec(args ...string) (resp.Value, error) {
 	if ss.c.multi == nil && blockingZeroTimeout(ss.s, argv) {
 		return resp.Value{}, ErrWouldBlock
 	}
+	if !ss.s.beginCommand() {
+		return resp.Value{}, errShuttingDown
+	}
 	ss.s.processCommand(ss.c, argv)
+	ss.s.endCommand()
+	if ss.c.shutdownReq {
+		ss.c.shutdownReq = false
+		if err := ss.s.shutdown(ss.c.shutdownSave, true); err != nil {
+			ss.c.writer.WriteError("ERR Errors trying to SHUTDOWN. Check logs.")
+		} else {
+			return resp.Value{}, errShuttingDown
+		}
+	}
 	if err := ss.c.flush(); err != nil {
 		return resp.Value{}, fmt.Errorf("exec: flush reply: %w", err)
 	}
@@ -166,10 +181,7 @@ func (ss *Session) Close() {
 	default:
 	}
 	c.pushMu.Lock()
-	c.dead = true
-	if c.pushCh != nil {
-		close(c.pushCh)
-	}
+	c.closePushLocked()
 	c.pushMu.Unlock()
 }
 

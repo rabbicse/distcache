@@ -80,9 +80,9 @@ var redis84Divergences = []divergence{
 		testutil.S("-ERR Bad number of keys provided", "FCALL", "f1", "x"),
 	)},
 	{"FunctionListFlags", "known bug B39: FUNCTION LIST returns flags as bulk strings; Redis uses status replies", fixed(
-		testutil.S(`"lib"`, "FUNCTION", "LOAD", libCode),
-		testutil.S(`*[`+libListEntry+`]`, "FUNCTION", "LIST"),
-		testutil.S(`*[`+libListEntry+`]`, "FUNCTION", "LIST", "LIBRARYNAME", "l*"),
+		testutil.S(`"lib"`, "FUNCTION", "LOAD", flagLibCode),
+		testutil.S(`*[`+flagLibListEntry+`]`, "FUNCTION", "LIST"),
+		testutil.S(`*[`+flagLibListEntry+`]`, "FUNCTION", "LIST", "LIBRARYNAME", "l*"),
 	)},
 	{"FunctionListBadArg", "known bug B40: FUNCTION LIST with an unknown argument replies syntax error", fixed(
 		testutil.S("-ERR Unknown argument BOGUS", "FUNCTION", "LIST", "BOGUS"),
@@ -97,6 +97,15 @@ var redis84Divergences = []divergence{
 			return []testutil.Step{testutil.S("-ERR Library lib already exists", "FUNCTION", "RESTORE", string(v.Str))}
 		}},
 }
+
+// flagLibCode registers a single function. Redis lists a library's functions
+// in hash order, which changes from one Redis process to the next, so a
+// script compared against a real Redis must not depend on that order.
+const flagLibCode = "#!lua name=lib\n" +
+	"redis.register_function{function_name='ro1', callback=function(keys, args) return redis.call('get', keys[1]) end, flags={'no-writes'}}\n"
+
+const flagLibListEntry = `*["library_name", "lib", "engine", "LUA", "functions", *[` +
+	`*["name", "ro1", "description", (nil), "flags", *[+no-writes]]]]`
 
 // runDivergence runs d's script on c after resetting it.
 func runDivergence(t *testing.T, c *testutil.Client, d divergence) {

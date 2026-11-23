@@ -145,6 +145,9 @@ const (
 )
 
 func (s *Server) waitBlocked(c *Client, w *waiter, ctx *Ctx) int {
+	if s.execStopped.Load() { // shutting down: give up, see stopExecution
+		return blockClosed
+	}
 	c.blockedNow.Store(true)
 	defer c.blockedNow.Store(false)
 	s.stats.totalBlocking.Add(1)
@@ -167,23 +170,53 @@ func (s *Server) waitBlocked(c *Client, w *waiter, ctx *Ctx) int {
 	peekDone := make(chan struct{})
 	go func() {
 		// Detect client disconnects while blocked, so a disconnected client
-		// never pops data it can no longer receive.
+		// never pops data it can no longer receive. Input that follows the
+		// blocking command is read ahead (and replayed by c.in), so a
+		// pipelined command cannot hide the disconnect.
 		defer close(peekDone)
-		if c.conn == nil || c.reader.Buffered() > 0 { // in-process sessions have no socket or reader
+		if c.conn == nil { // in-process sessions have no socket
 			return
 		}
-		_, err := c.reader.Underlying().Peek(1)
+		var err error
+		if c.in != nil {
+			err = c.in.readAhead(int(s.cfg.ClientQueryBufLimit.Load()))
+		} else if c.reader.Buffered() == 0 {
+			_, err = c.reader.Underlying().Peek(1)
+		}
 		if err != nil && !isTimeoutErr(err) {
 			close(closed)
 		}
 	}()
-	defer func() {
-		if c.conn != nil {
+	// stopWatch ends the watcher; it is idempotent.
+	stopped := false
+	stopWatch := func() {
+		if c.conn != nil && !stopped {
+			stopped = true
 			_ = c.conn.SetReadDeadline(time.Now())
 			<-peekDone
 			_ = c.conn.SetReadDeadline(time.Time{})
 		}
-	}()
+	}
+	defer stopWatch()
+	outcome := s.selectBlocked(c, w, timer, closed)
+	if outcome == blockWoken && s.execStopped.Load() {
+		return blockClosed
+	}
+	if outcome == blockWoken {
+		// A disconnect seen by the watcher wins over a racing wake-up, so no
+		// element is popped for a dead client; unregister passes the turn on.
+		stopWatch()
+		select {
+		case <-closed:
+			return blockClosed
+		default:
+		}
+	}
+	return outcome
+}
+
+// selectBlocked waits for the first event that ends a block.
+func (s *Server) selectBlocked(c *Client, w *waiter, timer <-chan time.Time, closed <-chan struct{}) int {
 	select {
 	case <-w.ch:
 		return blockWoken

@@ -62,13 +62,16 @@ type scriptEngine struct {
 	running   map[*scriptRun]struct{}
 	busySince atomic.Int64
 
-	pool sync.Pool
+	// pool holds idle VMs. SCRIPT FLUSH swaps in a fresh pool while
+	// scripts may be running, so it is only accessed through the pointer.
+	pool atomic.Pointer[sync.Pool]
 }
 
 // luaVM is one pooled interpreter with its compiled caches.
 type luaVM struct {
 	L        *lua.State
 	compiled map[string]*lua.Closure
+	pool     *sync.Pool // pool the VM was created for
 	fnVer    int64
 	fns      map[string]lua.Value
 	// per execution
@@ -84,7 +87,7 @@ type luaVM struct {
 func newScriptEngine(s *Server) *scriptEngine {
 	e := &scriptEngine{s: s, scripts: map[string]string{}, libs: map[string]*luaLibrary{},
 		funcs: map[string]*luaFunction{}, running: map[*scriptRun]struct{}{}}
-	e.pool.New = func() any { return e.newVM() }
+	e.pool.Store(e.newPool())
 	return e
 }
 
@@ -192,6 +195,10 @@ func (e *scriptEngine) newVM() *luaVM {
 	L.Globals.RawSet("KEYS", lua.NewTable(0, 0))
 	L.Globals.RawSet("ARGV", lua.NewTable(0, 0))
 	L.Globals.RawSet("os", osTable())
+	// VMs are pooled and shared by every client, so like Redis the globals
+	// table is readonly to scripts (assignment, rawset and setmetatable all
+	// fail); Go still installs KEYS and ARGV per run through RawSet.
+	L.Globals.ReadOnly = true
 	L.ProtectGlobals = true
 	L.Hook = func() error {
 		if vm.run != nil && vm.run.killed.Load() {
@@ -556,12 +563,26 @@ func (e *scriptEngine) redisCall(vm *luaVM, a []lua.Value, raise bool) lua.Value
 
 // ---- execution ----
 
-func (e *scriptEngine) getVM() *luaVM { return e.pool.Get().(*luaVM) }
+// newPool returns an empty VM pool whose VMs remember it, so putVM can drop
+// VMs checked out before a SCRIPT FLUSH instead of reusing their caches.
+func (e *scriptEngine) newPool() *sync.Pool {
+	p := &sync.Pool{}
+	p.New = func() any {
+		vm := e.newVM()
+		vm.pool = p
+		return vm
+	}
+	return p
+}
+
+func (e *scriptEngine) getVM() *luaVM { return e.pool.Load().Get().(*luaVM) }
 
 func (e *scriptEngine) putVM(vm *luaVM) {
 	vm.ctx, vm.sc, vm.run, vm.loading = nil, nil, nil, nil
 	vm.resp = 2
-	e.pool.Put(vm)
+	if p := e.pool.Load(); vm.pool == p {
+		p.Put(vm)
+	}
 }
 
 func (e *scriptEngine) startRun(isWrite bool) *scriptRun {
@@ -570,6 +591,16 @@ func (e *scriptEngine) startRun(isWrite bool) *scriptRun {
 	e.running[run] = struct{}{}
 	e.runMu.Unlock()
 	return run
+}
+
+// killAll aborts every running script, also one that already wrote: shutdown
+// must not wait for an endless script. The client gets an error reply.
+func (e *scriptEngine) killAll() {
+	e.runMu.Lock()
+	for run := range e.running {
+		run.killed.Store(true)
+	}
+	e.runMu.Unlock()
 }
 
 func (e *scriptEngine) endRun(run *scriptRun) {
@@ -796,7 +827,7 @@ func cmdScript(c *Ctx) {
 		e.scripts = map[string]string{}
 		e.mu.Unlock()
 		// Drop compiled caches by replacing the pool.
-		e.pool = sync.Pool{New: func() any { return e.newVM() }}
+		e.pool.Store(e.newPool())
 		c.W.WriteOK()
 	case "kill":
 		if msg := e.kill(false); msg != "" {

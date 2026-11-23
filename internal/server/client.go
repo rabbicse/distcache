@@ -29,6 +29,7 @@ type Client struct {
 	id      int64
 	conn    net.Conn
 	reader  *resp.Reader
+	in      *countingReader // reader's source; nil for the master link
 	writer  *resp.Writer
 	writeMu sync.Mutex // serialises every write to conn: replies (via w.Mu), pushes, replication
 	db      int
@@ -70,7 +71,11 @@ type Client struct {
 	noTouch         bool
 	addr, laddr     string
 	closeAfterReply bool
-	dbAtomic        atomic.Int32
+	// shutdownReq is set by SHUTDOWN; the caller of processCommand runs the
+	// shutdown (saving when shutdownSave) after leaving execGate.
+	shutdownReq  bool
+	shutdownSave bool
+	dbAtomic     atomic.Int32
 }
 
 func (s *Server) newClient(conn net.Conn) *Client {
@@ -78,13 +83,14 @@ func (s *Server) newClient(conn net.Conn) *Client {
 		s:         s,
 		id:        s.nextID.Add(1),
 		conn:      conn,
-		reader:    resp.NewReader(&countingReader{conn, &s.stats.netInput}, 16*1024),
+		in:        &countingReader{r: conn, n: &s.stats.netInput},
 		proto:     2,
 		created:   time.Now(),
 		unblockCh: make(chan int, 1),
 		addr:      conn.RemoteAddr().String(),
 		laddr:     conn.LocalAddr().String(),
 	}
+	c.reader = resp.NewReader(c.in, 16*1024)
 	c.writer = resp.NewWriter(&countingWriter{conn, &s.stats.netOutput}, 2)
 	c.writer.Mu = &c.writeMu
 	c.reader.MaxBulkLen = s.cfg.ProtoMaxBulkLen.Load()
@@ -102,15 +108,49 @@ func (s *Server) newClient(conn net.Conn) *Client {
 	return c
 }
 
+// countingReader is a client's socket source. While the client is blocked,
+// waitBlocked reads ahead into pending to notice a disconnect even when more
+// input follows the blocking command; Read serves those bytes first. Only one
+// goroutine uses it at a time (the client loop, or waitBlocked's watcher
+// while the loop waits for it).
 type countingReader struct {
-	r io.Reader
-	n *atomic.Int64
+	r       io.Reader
+	n       *atomic.Int64
+	pending []byte // input read ahead while blocked, not yet consumed
+	err     error  // read error seen while reading ahead, returned after pending
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
+	if len(c.pending) > 0 {
+		n := copy(p, c.pending)
+		c.pending = c.pending[n:]
+		return n, nil
+	}
+	if c.err != nil {
+		return 0, c.err
+	}
 	n, err := c.r.Read(p)
 	c.n.Add(int64(n))
 	return n, err
+}
+
+// readAhead reads from the socket into pending until it fails, and returns
+// the error. limit caps pending: past it, it stops reading and returns nil,
+// as Redis stops reading a client over its query buffer limit.
+func (c *countingReader) readAhead(limit int) error {
+	var buf [4096]byte
+	for len(c.pending) < limit {
+		n, err := c.r.Read(buf[:])
+		c.n.Add(int64(n))
+		c.pending = append(c.pending, buf[:n]...)
+		if err != nil {
+			if !isTimeoutErr(err) {
+				c.err = err
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 type countingWriter struct {
@@ -152,6 +192,7 @@ func (s *Server) serveClient(c *Client) {
 		} else if to > 0 {
 			_ = c.conn.SetReadDeadline(time.Time{})
 		}
+		c.reader.Unauthenticated = !c.authed && s.cfg.RequirePassSet.Load()
 		args, err := c.reader.ReadCommand()
 		if err != nil {
 			var pe *resp.ProtocolError
@@ -165,7 +206,21 @@ func (s *Server) serveClient(c *Client) {
 			continue
 		}
 		c.lastInteraction.Store(time.Now().Unix())
+		if !s.beginCommand() {
+			// Shutting down: replies to commands already run are sent, this
+			// one gets none.
+			_ = c.flush()
+			return
+		}
 		s.processCommand(c, args)
+		s.endCommand()
+		if c.shutdownReq {
+			c.shutdownReq = false
+			if err := s.shutdown(c.shutdownSave, true); err == nil {
+				return
+			}
+			c.writer.WriteError("ERR Errors trying to SHUTDOWN. Check logs.")
+		}
 		if c.closeAfterReply {
 			_ = c.flush()
 			return
@@ -189,16 +244,24 @@ func (s *Server) closeClient(c *Client) {
 	s.watches.unwatchAll(c)
 	s.removeMonitor(c)
 	c.pushMu.Lock()
-	c.dead = true
-	if c.pushCh != nil {
-		close(c.pushCh)
-	}
+	c.closePushLocked()
 	c.pushMu.Unlock()
 	s.clientsMu.Lock()
 	delete(s.clients, c.id)
 	s.clientsMu.Unlock()
 	if c.replica != nil {
 		s.replication.removeReplica(c.replica)
+	}
+}
+
+// closePushLocked marks the client dead and closes its push queue exactly
+// once. Both an overflowing push and client teardown end up here, so the queue
+// is cleared after closing. The caller holds pushMu.
+func (c *Client) closePushLocked() {
+	c.dead = true
+	if c.pushCh != nil {
+		close(c.pushCh)
+		c.pushCh = nil
 	}
 }
 
@@ -245,8 +308,7 @@ func (c *Client) push(msg []byte) {
 	select {
 	case c.pushCh <- msg:
 	default:
-		c.dead = true
-		close(c.pushCh)
+		c.closePushLocked()
 		c.s.stats.evictedClients.Add(1)
 		c.s.log.Warn("client closed for overcoming of output buffer limits", "id", c.id, "addr", c.addr)
 		_ = c.conn.Close() // best-effort: cleanup after failure or teardown

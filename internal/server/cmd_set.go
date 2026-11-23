@@ -412,6 +412,30 @@ func cmdSInterStore(c *Ctx) { setOpGeneric(c, 0, true) }
 func cmdSUnionStore(c *Ctx) { setOpGeneric(c, 1, true) }
 func cmdSDiffStore(c *Ctx)  { setOpGeneric(c, 2, true) }
 
+// parseInterCardLimit parses the "LIMIT n" options that end SINTERCARD and
+// ZINTERCARD, starting at argument index from. Like Redis it accepts the
+// option more than once and the last one wins. ok is false when an error
+// reply was sent.
+func (c *Ctx) parseInterCardLimit(from int) (limit int64, ok bool) {
+	for i := from; i < len(c.Args); i += 2 {
+		if i+1 >= len(c.Args) || !c.Is(i, "limit") {
+			c.SyntaxErr()
+			return 0, false
+		}
+		l, isInt := parseInt(c.Args[i+1])
+		if !isInt {
+			c.Err(errNotInt)
+			return 0, false
+		}
+		if l < 0 {
+			c.Err("ERR LIMIT can't be negative")
+			return 0, false
+		}
+		limit = l
+	}
+	return limit, true
+}
+
 func cmdSInterCard(c *Ctx) {
 	n, ok := parseInt(c.Args[1])
 	if !ok || n <= 0 {
@@ -422,23 +446,9 @@ func cmdSInterCard(c *Ctx) {
 		c.Err("ERR Number of keys can't be greater than number of args")
 		return
 	}
-	var limit int64
-	rest := c.Args[2+n:]
-	if len(rest) > 0 {
-		if len(rest) != 2 || !c.Is(2+int(n), "limit") {
-			c.SyntaxErr()
-			return
-		}
-		l, ok := parseInt(rest[1])
-		if !ok {
-			c.Err(errNotInt)
-			return
-		}
-		if l < 0 {
-			c.Err("ERR LIMIT can't be negative")
-			return
-		}
-		limit = l
+	limit, ok := c.parseInterCardLimit(2 + int(n))
+	if !ok {
+		return
 	}
 	sets, ok := c.collectSets(argStrings(c.Args[2 : 2+n]))
 	if !ok {
