@@ -1142,23 +1142,9 @@ func cmdZInterCard(c *Ctx) {
 		c.Err("ERR Number of keys can't be greater than number of args")
 		return
 	}
-	var limit int64
-	rest := c.Args[2+n:]
-	if len(rest) > 0 {
-		if len(rest) != 2 || !c.Is(2+int(n), "limit") {
-			c.SyntaxErr()
-			return
-		}
-		l, ok := parseInt(rest[1])
-		if !ok {
-			c.Err(errNotInt)
-			return
-		}
-		if l < 0 {
-			c.Err("ERR LIMIT can't be negative")
-			return
-		}
-		limit = l
+	limit, ok := c.parseInterCardLimit(2 + int(n))
+	if !ok {
+		return
 	}
 	var inputs []map[string]float64
 	for _, k := range argStrings(c.Args[2 : 2+n]) {
