@@ -9,12 +9,14 @@ DistCache is **not faster than Redis overall** today.
 
 - **Simple commands, no pipelining:** DistCache is 1.1 to 1.5 times faster
   than Redis in its default configuration.
-- **Pipelined commands:** Redis is faster, by up to 3 times on set, hash and
-  sorted-set writes.
+- **Pipelined commands:** Redis is faster: by 10 to 25% on `SET`, `GET` and
+  `INCR`, and by up to 3 times on the list, set, hash and sorted-set tests.
+  Those four tests write to **one key**, which is the worst case for
+  DistCache; spread over many keys they are within about 25% of Redis.
 - **Redis with `--io-threads 4`:** Redis is faster in three of the four
   load shapes tested, by 1.3 to 4.8 times depending on the command.
-- **Sorted-set writes (`ZADD`):** Redis is about 2 to 3.5 times faster in
-  every test.
+- **Sorted-set writes (`ZADD`):** Redis is about 2 to 3.5 times faster when
+  every client writes the same sorted set, and 10 to 25% faster over many.
 - **When one client runs a slow command:** Redis stops serving everyone
   else until it finishes; DistCache keeps going. In that test DistCache
   served about 190 times more `GET`s per second than Redis.
@@ -104,25 +106,62 @@ keys, which lock the shards they use for their whole run.
 
 Source: [2026-11-23-slow-command-docker-linux-arm64-m1.md](../bench/results/2026-11-23-slow-command-docker-linux-arm64-m1.md).
 
-## Why throughput is not ahead, and what is planned
+## The collection tests write to one key
 
-These are the known costs on the command path; they have not been profiled
-one by one yet.
+Like `redis-benchmark`, the load tool sends every `LPUSH`, `SADD`, `HSET`
+and `ZADD` to a single key (`mylist`, `myset`, `myhash`, `myzset`). All the
+clients then queue on one shard lock, so DistCache runs those tests on one
+core and pays for handing the lock from goroutine to goroutine. A profile of
+the pipelined `SADD`/`HSET` run shows the 50 clients waiting for that lock
+for about 85% of the run.
 
-- Every write passes through one mutex that orders the replication and AOF
-  stream (`propagator.mu`), even with persistence off. Writes on different
-  shards therefore still queue behind each other.
-- Each command takes and releases a shard lock and updates shared counters.
-  Redis does neither.
-- A pipeline of 16 commands is 16 separate lock round trips in DistCache.
-  Redis runs the 16 back to back with no locking, which is why pipelining
-  helps Redis more.
-- The sorted set is slower than Redis's in every test, with or without
-  contention.
+The same four commands with the key chosen at random from 100,000 (a
+one-off run with a patched load tool, Redis in its default configuration):
 
-The next sub-project targets exactly these: removing the global propagation
-lock, per-shard counters, buffer pooling, lock-free reads and a faster
-sorted set. The results on this page are the baseline it has to beat.
+| Command | 50 clients | 500 clients | 50 clients, pipeline 16 | 500 clients, pipeline 16 |
+|---|---|---|---|---|
+| `LPUSH` | 166 vs 161 (1.04) | 185 vs 108 (**1.72**) | 822 vs 869 (0.95) | 976 vs 838 (**1.16**) |
+| `SADD` | 151 vs 176 (0.85) | 220 vs 168 (**1.31**) | 698 vs 784 (0.89) | 753 vs 771 (0.98) |
+| `HSET` | 184 vs 179 (1.02) | 161 vs 182 (0.89) | 687 vs 823 (0.83) | 752 vs 778 (0.97) |
+| `ZADD` | 142 vs 165 (0.86) | 152 vs 168 (0.91) | 484 vs 642 (0.75) | 559 vs 627 (0.89) |
+
+So one hot key is where DistCache is 2 to 3 times behind; on many keys it is
+roughly level with Redis, not ahead.
+
+## Where the time goes
+
+CPU, mutex and blocking profiles of the server under these loads (Linux, in
+the same VM) show four costs, largest first.
+
+1. **Reading the clock.** A `SET` reads the system clock seven or eight
+   times: for the idle timer, the command statistics, the expiry check and
+   three times for the LFU counter. That is about 19% of CPU on pipelined
+   `SET` and `GET`. Redis reads the clock once per event-loop cycle.
+2. **Allocation and garbage collection.** Each command allocates its
+   arguments, a context, a key string, a database handle and a propagation
+   record. Allocation is about 16% of CPU on pipelined `SET` and the
+   collector's background work another 14%.
+3. **Lock handoff on a hot key**, described above.
+4. **The append-only file.** With `appendonly yes` and `everysec`, pipelined
+   `SET` throughput fell by about half in a local run. Every write queues on
+   one mutex that orders the log (`propagator.mu`), and it does so while
+   holding its shard lock, so the queue spreads to the shards. With
+   persistence off that mutex is a minor cost.
+
+Without pipelining the server is bound by system calls instead: one read
+and one write per command are 53% of CPU with 500 clients. That is also
+why Redis with I/O threads, which serves many sockets per wake-up, is ahead
+at 500 clients.
+
+A check with the server pinned to four CPUs and the load tool to the other
+four gave the same picture as the shared runs above, so the gap is in the
+server, not an artefact of sharing CPUs with the load tool.
+
+The next sub-project targets these in that order: a cached clock, fewer
+allocations per command, running a pipeline's commands for one shard under
+one lock, a log that does not serialize every write behind one mutex, and
+per-shard counters. The results on this page are the baseline it has to
+beat.
 
 ## Limits of these numbers
 
