@@ -192,6 +192,10 @@ func (e *scriptEngine) newVM() *luaVM {
 	L.Globals.RawSet("KEYS", lua.NewTable(0, 0))
 	L.Globals.RawSet("ARGV", lua.NewTable(0, 0))
 	L.Globals.RawSet("os", osTable())
+	// VMs are pooled and shared by every client, so like Redis the globals
+	// table is readonly to scripts (assignment, rawset and setmetatable all
+	// fail); Go still installs KEYS and ARGV per run through RawSet.
+	L.Globals.ReadOnly = true
 	L.ProtectGlobals = true
 	L.Hook = func() error {
 		if vm.run != nil && vm.run.killed.Load() {
