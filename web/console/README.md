@@ -1,6 +1,10 @@
-# DistCache web console (planned)
+# Web console
 
-Home of the React web console (roadmap sub-project 7): browse keys, inspect every
-data type, watch live server metrics and visualise data, in the spirit of RedisInsight.
-It will talk to DistCache through the HTTP/WebSocket gateway planned in sub-project 5.
-Nothing is implemented yet; the design comes first.
+The console is built into the server binary and lives in
+[internal/web](../../internal/web): Go `html/template` pages with htmx, embedded
+with `go:embed`. There is no separate front-end project and nothing to build
+here.
+
+Design: [docs/superpowers/specs/2026-11-10-web-console-design.md](../../docs/superpowers/specs/2026-11-10-web-console-design.md).
+Status: login, dashboard and command console are written and tested;
+`distcache-server` does not start the console yet.

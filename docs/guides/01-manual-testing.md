@@ -25,7 +25,8 @@ DistCache uses the Redis protocol (RESP), so any Redis client works. Pick one:
 | Option | Command |
 |---|---|
 | `redis-cli` from Homebrew | `brew install redis`, then run `redis-cli -p 6379` |
-| `redis-cli` from Docker | `docker run --rm -it --network host redis:8.4.8 redis-cli -p 6379` |
+| `redis-cli` from Docker (Linux) | `docker run --rm -it --network host redis:8.4 redis-cli -p 6379` |
+| `redis-cli` from Docker Desktop (macOS, Windows) | `docker run --rm -it redis:8.4 redis-cli -h host.docker.internal -p 6379 -a yourpassword`. Here the container is not a local client, so start the server with `--requirepass yourpassword`. |
 | No install at all | `nc 127.0.0.1 6379`, then type commands such as `PING` and press Enter |
 
 The examples below are written for `redis-cli`. With `nc` you see raw RESP replies
@@ -159,10 +160,17 @@ REDIS_SERVER_ADDR=127.0.0.1:6391 go test ./internal/server -run Redis84   # comp
 
 ## Known differences from Redis 8.4
 
-The project ledger tracks the known differences as bugs B20–B40. Most are
-differences in error-message wording. You may also notice these:
+Replies are compared with a real Redis 8.4 in the test suite, so for the
+commands DistCache has, differences are few. The ones you are most likely to
+meet by hand:
 
-- `INFO server` reports `redis_version:7.4.0` instead of 8.4.
-- `GEOPOS` formats coordinates with more digits than Redis.
-- `BLMOVE` and `BRPOPLPUSH` reply with a null bulk string on timeout instead of a null array.
-- `DEBUG` is always enabled. Do not expose the port to untrusted networks.
+- Commands from Redis's bundled modules (`JSON.*`, `FT.*`, `TS.*`, `BF.*`,
+  vector sets) and a few new core ones (`MSETEX`, `DELEX`, `DIGEST`) reply
+  "unknown command".
+- `ACL SETUSER` and `CLIENT TRACKING ON` reply with an error: there is one
+  user, `default`, and no client-side caching.
+- `DEBUG` is refused unless you start the server with
+  `--enable-debug-command yes` (the same default as Redis).
+- `DUMP` payloads and the snapshot file are DistCache's own format.
+
+The full list is in [redis-compatibility.md](../redis-compatibility.md).

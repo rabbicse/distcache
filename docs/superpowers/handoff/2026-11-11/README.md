@@ -8,6 +8,21 @@ To resume, say: *"Follow docs/superpowers/handoff/2026-11-11/README.md and conti
 2. Continue `docs/superpowers/plans/2026-11-10-web-console-phase-a.md`, subagent-driven, from Task 8.
 3. Rules: commits are authored by `Md Mehedi Hasan <rabbi.se@gmail.com>` with no Co-Authored-By trailers. Ask before pushing. Use stdlib net/http, not gin.
 
+## Update 2026-11-23: branch `release-readiness` (not merged, not pushed)
+
+A full code review, a Redis 8.4 gap analysis, fresh benchmarks, packaging and documentation were done on `release-readiness`, branched from `master` at `95f5d4d`. Read these first:
+- [docs/code-review-2026-11-23.md](../../../code-review-2026-11-23.md): 51 findings, 33 fixed (every critical and high one), 18 open
+- [docs/redis-compatibility.md](../../../redis-compatibility.md), [docs/benchmarks.md](../../../benchmarks.md), [docs/features.md](../../../features.md), [docs/guides/03-deployment.md](../../../guides/03-deployment.md)
+
+Next steps from that work:
+- [ ] Review and merge `release-readiness` into `master`
+- [ ] Fix the three medium web-console findings (WEB-2, WEB-3, WEB-4) before Task 9 starts the console from the server
+- [ ] Apply `deploy/kubernetes` to a real cluster (kind or Docker Desktop Kubernetes); so far the manifests have only been rendered with kustomize
+- [ ] Push a `v1.0.0` tag to exercise `.github/workflows/release.yml` (never run yet); it publishes the archives and `ghcr.io/rabbicse/distcache`
+- [ ] Look at the Windows test job in CI (informational, `continue-on-error`); make it blocking once it is green
+- [ ] Remaining open review items: DUR-7 (60 s full-sync deadline), DUR-8 (sub-replicas after a full resync), CMDA-6 (MSETEX, DELEX, DIGEST, SET IFEQ…), and the low ones in the review document
+- [ ] Sub-project 2 (throughput) is now the clear priority: Redis is ahead with pipelining, with `--io-threads`, and on ZADD everywhere
+
 ## TODO
 
 ### Web console phase A (sub-project 7)
@@ -21,11 +36,11 @@ To resume, say: *"Follow docs/superpowers/handoff/2026-11-11/README.md and conti
 - [ ] B44 `INFO` has no `latencystats` section (dashboard p50/p99 show "—")
 - [ ] B26 FIFO fairness against non-blocked poppers
 - [ ] B27 a replica restart forces a full resync (snapshot lacks repl id/offset)
-- [ ] B28 DEBUG is not gated by `enable-debug-command` (security; sub-project 4)
+- [x] B28 DEBUG is gated by `enable-debug-command` (done 2026-11-23)
 - [ ] Parked minors from bug batch 2: PFCOUNT in a script never caches; no lazy expiry under exclusive locks; cacheHLLCount resets LRU/LFU
 
 ### Ops / housekeeping
-- [ ] Re-run `make bench` with Docker + redis:8.4.8 (the baseline predates the per-cell FLUSHALL)
+- [x] Re-run `make bench` with Docker + redis:8.4.8 (done 2026-11-23, see docs/benchmarks.md)
 - [ ] Run the Java/Python/Node examples (they need Jedis / redis-py / ioredis installed)
 - [ ] Install `gh` (`brew install gh && gh auth login`) so CI status can be checked from here
 - [ ] Decide on the license (currently Apache-2.0; AGPL is the alternative for a server)
