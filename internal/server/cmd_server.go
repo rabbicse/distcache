@@ -703,16 +703,15 @@ func cmdShutdown(c *Ctx) {
 			return
 		}
 	}
-	if save && !c.server.cfg.AppendOnly.Load() {
-		if err := c.server.saveSync(); err != nil {
-			c.Err("ERR Errors trying to SHUTDOWN. Check logs.")
-			return
-		}
+	save = save && !c.server.cfg.AppendOnly.Load()
+	if c.client == nil {
+		go func() { _ = c.server.Shutdown(save) }()
+		return
 	}
-	go func() { _ = c.server.Shutdown(false) }()
-	if c.client != nil {
-		c.client.closeAfterReply = true
-	}
+	// The shutdown waits for in-flight commands, this one included, so the
+	// client loop runs it after this command (see serveClient).
+	c.client.shutdownReq = true
+	c.client.shutdownSave = save
 }
 
 func cmdMonitor(c *Ctx) {

@@ -181,7 +181,7 @@ func (s *Server) waitPause(cmd *Command) {
 	for {
 		end = s.pauseEnd.Load()
 		d := time.Until(time.UnixMilli(end))
-		if end == 0 || d <= 0 {
+		if end == 0 || d <= 0 || s.execStopped.Load() { // shutdown must not wait for the pause
 			return
 		}
 		if d > 50*time.Millisecond {

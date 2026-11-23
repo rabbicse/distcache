@@ -572,6 +572,16 @@ func (e *scriptEngine) startRun(isWrite bool) *scriptRun {
 	return run
 }
 
+// killAll aborts every running script, also one that already wrote: shutdown
+// must not wait for an endless script. The client gets an error reply.
+func (e *scriptEngine) killAll() {
+	e.runMu.Lock()
+	for run := range e.running {
+		run.killed.Store(true)
+	}
+	e.runMu.Unlock()
+}
+
 func (e *scriptEngine) endRun(run *scriptRun) {
 	e.runMu.Lock()
 	delete(e.running, run)

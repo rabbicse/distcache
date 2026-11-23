@@ -71,7 +71,11 @@ type Client struct {
 	noTouch         bool
 	addr, laddr     string
 	closeAfterReply bool
-	dbAtomic        atomic.Int32
+	// shutdownReq is set by SHUTDOWN; the caller of processCommand runs the
+	// shutdown (saving when shutdownSave) after leaving execGate.
+	shutdownReq  bool
+	shutdownSave bool
+	dbAtomic     atomic.Int32
 }
 
 func (s *Server) newClient(conn net.Conn) *Client {
@@ -202,7 +206,21 @@ func (s *Server) serveClient(c *Client) {
 			continue
 		}
 		c.lastInteraction.Store(time.Now().Unix())
+		if !s.beginCommand() {
+			// Shutting down: replies to commands already run are sent, this
+			// one gets none.
+			_ = c.flush()
+			return
+		}
 		s.processCommand(c, args)
+		s.endCommand()
+		if c.shutdownReq {
+			c.shutdownReq = false
+			if err := s.shutdown(c.shutdownSave, true); err == nil {
+				return
+			}
+			c.writer.WriteError("ERR Errors trying to SHUTDOWN. Check logs.")
+		}
 		if c.closeAfterReply {
 			_ = c.flush()
 			return

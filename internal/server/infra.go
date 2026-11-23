@@ -145,6 +145,9 @@ const (
 )
 
 func (s *Server) waitBlocked(c *Client, w *waiter, ctx *Ctx) int {
+	if s.execStopped.Load() { // shutting down: give up, see stopExecution
+		return blockClosed
+	}
 	c.blockedNow.Store(true)
 	defer c.blockedNow.Store(false)
 	s.stats.totalBlocking.Add(1)
@@ -196,6 +199,9 @@ func (s *Server) waitBlocked(c *Client, w *waiter, ctx *Ctx) int {
 	}
 	defer stopWatch()
 	outcome := s.selectBlocked(c, w, timer, closed)
+	if outcome == blockWoken && s.execStopped.Load() {
+		return blockClosed
+	}
 	if outcome == blockWoken {
 		// A disconnect seen by the watcher wins over a racing wake-up, so no
 		// element is popped for a dead client; unregister passes the turn on.
