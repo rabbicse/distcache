@@ -69,6 +69,8 @@ type Config struct {
 	saveSeen        bool
 	// enableProtected is enable-protected-configs: "no", "yes" or "local".
 	enableProtected string
+	// enableDebug is enable-debug-command: "no", "yes" or "local".
+	enableDebug string
 
 	// Web console settings (static, guarded by mu).
 	WebPort           int           // web-port: 0 disables the console
@@ -236,6 +238,7 @@ func Default() *Config {
 		Dir:               ".",
 		DBFilename:        "dump.dcs",
 		enableProtected:   "no",
+		enableDebug:       "no",
 		AppendFilename:    "appendonly.aof",
 		AppendFsync:       "everysec",
 		Save:              [][2]int64{{3600, 1}, {300, 100}, {60, 10000}},
@@ -385,8 +388,7 @@ var ignoredParams = []string{"daemonize", "supervised", "tcp-backlog", "io-threa
 	"latency-monitor-threshold", "list-compress-depth", "stream-node-max-bytes",
 	"stream-node-max-entries", "activerehashing", "dynamic-hz", "aof-rewrite-incremental-fsync",
 	"rdb-save-incremental-fsync", "jemalloc-bg-thread", "activedefrag", "crash-log-enabled",
-	"crash-memcheck-enabled", "syslog-enabled", "syslog-ident", "syslog-facility", "enable-debug-command",
-	"enable-module-command", "locale-collate", "appenddirname",
+	"crash-memcheck-enabled", "syslog-enabled", "syslog-ident", "syslog-facility", "enable-module-command", "locale-collate", "appenddirname",
 	"cluster-enabled", "tls-port", "acllog-max-len", "tracking-table-max-keys", "active-expire-effort",
 	"close-on-oom", "unixsocketperm", "propagation-error-behavior", "lua-replicate-commands",
 	"client-query-buffer-limit-ignored", "replica-announced", "maxmemory-clients", "maxmemory-eviction-tenacity"}
@@ -432,6 +434,15 @@ func (c *Config) registerParams() {
 			return nil
 		})
 	c.strParam("appendfilename", false, &c.AppendFilename)
+	c.add("enable-debug-command", false, func(c *Config) string { return c.enableDebug },
+		func(c *Config, v string) error {
+			switch v = strings.ToLower(v); v {
+			case "no", "yes", "local":
+				c.enableDebug = v
+				return nil
+			}
+			return errors.New("argument(s) must be one of the following: no, yes, local")
+		})
 	c.add("enable-protected-configs", false, func(c *Config) string { return c.enableProtected },
 		func(c *Config, v string) error {
 			switch v = strings.ToLower(v); v {
@@ -622,6 +633,14 @@ func (c *Config) Set(name, value string, startup bool) error {
 		return fmt.Errorf("CONFIG SET failed (possibly related to argument '%s') - %v", name, err)
 	}
 	return nil
+}
+
+// EnableDebugCommand returns enable-debug-command: "no", "yes" or "local"
+// (allowed for connections from this host only). It is fixed at startup.
+func (c *Config) EnableDebugCommand() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.enableDebug
 }
 
 // SetFromClient is CONFIG SET from a connection: it refuses protected params

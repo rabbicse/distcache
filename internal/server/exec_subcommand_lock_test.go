@@ -1,5 +1,6 @@
 // Regression tests: commands that address their key through a subcommand
-// (MEMORY USAGE, DEBUG OBJECT) must lock that key's shard inside MULTI/EXEC.
+// (MEMORY USAGE, OBJECT, XINFO) must lock that key's shard inside MULTI/EXEC.
+// DEBUG OBJECT is the same kind of command but cannot be queued in MULTI.
 package server_test
 
 import (
@@ -19,7 +20,6 @@ func TestExec_SubcommandKeyIsLocked(t *testing.T) {
 		cmd  []string
 	}{
 		{"memory usage", []string{"MEMORY", "USAGE", "k1"}},
-		{"debug object", []string{"DEBUG", "OBJECT", "k1"}},
 		{"object encoding", []string{"OBJECT", "ENCODING", "k1"}},
 		{"xinfo stream", []string{"XINFO", "STREAM", "k1"}},
 	}

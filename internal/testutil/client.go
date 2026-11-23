@@ -179,6 +179,10 @@ func StartServerOpts(t testing.TB, o Options) (*server.Server, string) {
 	cfg.Port = 0
 	cfg.Dir = t.TempDir()
 	cfg.Save = nil
+	// Tests drive the server through DEBUG, which is off by default.
+	if err := cfg.Set("enable-debug-command", "yes", true); err != nil {
+		t.Fatalf("enable-debug-command: %v", err)
+	}
 	if o.Mutate != nil {
 		o.Mutate(cfg)
 	}

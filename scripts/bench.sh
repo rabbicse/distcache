@@ -5,7 +5,8 @@
 # binaries (for example inside a container without Go; BENCH_GO_VERSION then
 # names the toolchain that built them), BENCH_HOST to name the result file
 # when the hostname is meaningless (containers) and BENCH_NOTE to record how
-# the run was set up.
+# the run was set up. BENCH_REDIS_ARGS adds redis-server arguments, for
+# example "--io-threads 4" to compare against Redis with threaded I/O.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,7 +38,12 @@ GOVER="$(go version 2>/dev/null || echo "${BENCH_GO_VERSION:-unknown} (prebuilt 
 # port_listening is a connect-only probe: it cannot hang on a listener that
 # accepts but never replies, unlike a PING.
 port_listening() { # port
-  nc -z 127.0.0.1 "$1" >/dev/null 2>&1
+  if command -v nc >/dev/null 2>&1; then
+    nc -z 127.0.0.1 "$1" >/dev/null 2>&1
+  else
+    # Minimal images (the redis one, for example) have no nc; bash can connect.
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+  fi
 }
 
 port_answers() { # port
@@ -84,7 +90,8 @@ if command -v redis-server >/dev/null 2>&1; then
   HAVE_REDIS=1
   require_free "$RD_PORT"
   mkdir -p "$TMP/rd"
-  redis-server --port "$RD_PORT" --save "" --appendonly no --dir "$TMP/rd" >"$TMP/rd.log" 2>&1 &
+  # shellcheck disable=SC2086 # BENCH_REDIS_ARGS is a list of words on purpose
+  redis-server --port "$RD_PORT" --save "" --appendonly no --dir "$TMP/rd" ${BENCH_REDIS_ARGS:-} >"$TMP/rd.log" 2>&1 &
   PIDS+=("$!")
   wait_port "$RD_PORT" "$!"
 fi
@@ -112,6 +119,7 @@ OUT="bench/results/$(date +%F)-${BENCH_HOST:-$(hostname -s)}.md"
   echo "Requests per test: $N, tests: $TESTS, keyspace 100000, data size 3 bytes."
   if [ "$HAVE_REDIS" = 1 ]; then
     echo "Redis: $(redis-server --version)"
+    echo "Redis arguments: --save \"\" --appendonly no ${BENCH_REDIS_ARGS:-}"
   else
     echo "Redis comparison: pending (redis-server not on PATH when this ran)."
   fi

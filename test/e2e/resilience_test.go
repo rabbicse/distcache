@@ -67,7 +67,7 @@ func startProc(t *testing.T, dir string, args ...string) *proc {
 	}
 	port := l.Addr().(*net.TCPAddr).Port
 	_ = l.Close() // free the port for the server; a tiny reuse race is acceptable in tests
-	all := append([]string{"--port", strconv.Itoa(port), "--bind", "127.0.0.1", "--dir", dir, "--save", ""}, args...)
+	all := append([]string{"--port", strconv.Itoa(port), "--bind", "127.0.0.1", "--dir", dir, "--save", "", "--enable-debug-command", "local"}, args...)
 	p := &proc{cmd: exec.Command(serverBinary(t), all...), log: &bytes.Buffer{}}
 	p.cmd.Stdout, p.cmd.Stderr = p.log, p.log
 	if err := p.cmd.Start(); err != nil {

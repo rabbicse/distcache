@@ -263,7 +263,7 @@ func (s *Server) registerCommands() {
 		{"command", -1, "loading stale", 0, 0, 0, "server", cmdCommand, nil},
 		{"config", -2, "admin noscript loading stale", 0, 0, 0, "server", cmdConfig, nil},
 		{"info", -1, "loading stale", 0, 0, 0, "server", cmdInfo, nil},
-		{"debug", -2, "admin noscript loading stale", 0, 0, 0, "server", cmdDebug, nil},
+		{"debug", -2, "admin noscript loading stale no_multi", 0, 0, 0, "server", cmdDebug, nil},
 		{"time", 1, "loading stale fast", 0, 0, 0, "server", cmdTime, nil},
 		{"lastsave", 1, "loading stale fast", 0, 0, 0, "server", cmdLastSave, nil},
 		{"save", 1, "admin noscript", 0, 0, 0, "server", cmdSave, nil},
