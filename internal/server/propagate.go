@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rabbicse/distcache/internal/resp"
@@ -37,6 +38,9 @@ type propagator struct {
 	aofBuf    []byte
 	aofSignal chan struct{}
 	aofErr    error
+	// aofErrMsg mirrors aofErr for the lock-free MISCONF check on the
+	// command path; nil while the AOF is healthy.
+	aofErrMsg atomic.Pointer[string]
 	aofSize   int64
 	lastFsync time.Time
 	rewrite   *bytes.Buffer
@@ -156,11 +160,12 @@ func (p *propagator) writeAOF(buf []byte) {
 		if len(p.aofBuf) > 0 {
 			p.flushAOFLocked()
 		}
-		if _, err := p.aofFile.Write(buf); err != nil {
-			p.aofErr = err
+		n, err := p.aofFile.Write(buf)
+		if err == nil {
+			err = p.aofFile.Sync()
 		}
-		_ = p.aofFile.Sync()
-		p.aofSize += int64(len(buf))
+		p.aofSize += int64(n)
+		p.setAOFErrLocked(err)
 		return
 	}
 	p.aofBuf = append(p.aofBuf, buf...)
@@ -177,8 +182,10 @@ func (p *propagator) flushAOFLocked() {
 	n, err := p.aofFile.Write(p.aofBuf)
 	p.aofSize += int64(n)
 	if err != nil {
-		p.aofErr = err
-		p.server.log.Warn("error writing to the AOF file", "err", err)
+		// Cleared only once a later write is fsynced (setAOFErrLocked(nil)).
+		p.setAOFErrLocked(err)
+	} else if p.server.cfg.AppendFsync == "no" {
+		p.setAOFErrLocked(nil)
 	}
 	if cap(p.aofBuf) > 4<<20 {
 		p.aofBuf = nil
@@ -207,7 +214,13 @@ func (p *propagator) aofWriter() {
 			fsync := p.server.cfg.AppendFsync == "everysec"
 			p.mu.Unlock()
 			if f != nil && fsync {
-				_ = f.Sync()
+				err := f.Sync()
+				p.mu.Lock()
+				// Clear a recorded error only if nothing failed to reach f.
+				if p.aofFile == f && (err != nil || len(p.aofBuf) == 0) {
+					p.setAOFErrLocked(err)
+				}
+				p.mu.Unlock()
 			}
 		}
 	}
@@ -220,10 +233,42 @@ func (p *propagator) closeAOF() {
 	defer p.mu.Unlock()
 	if p.aofFile != nil {
 		p.flushAOFLocked()
-		_ = p.aofFile.Sync()
-		_ = p.aofFile.Close()
+		if err := errors.Join(p.aofFile.Sync(), p.aofFile.Close()); err != nil {
+			p.server.log.Warn("closing the AOF failed", "err", err)
+		}
 		p.aofFile = nil
 	}
+	// With the AOF off its write state no longer gates writes.
+	p.setAOFErrLocked(nil)
+}
+
+// setAOFErrLocked records the outcome of an AOF write or fsync: an error
+// makes write commands fail with MISCONF until a later write reaches the disk,
+// like Redis' aof_last_write_status. p.mu must be held.
+func (p *propagator) setAOFErrLocked(err error) {
+	if err == nil {
+		if p.aofErr != nil {
+			p.server.log.Info("AOF write error state cleared")
+		}
+		p.aofErr = nil
+		p.aofErrMsg.Store(nil)
+		return
+	}
+	if p.aofErr == nil {
+		p.server.log.Warn("error writing to the AOF file", "err", err)
+	}
+	p.aofErr = err
+	msg := err.Error()
+	p.aofErrMsg.Store(&msg)
+}
+
+// aofWriteError returns the last AOF write or fsync error message, or "" when
+// the AOF is healthy. It is lock-free for the command path.
+func (p *propagator) aofWriteError() string {
+	if m := p.aofErrMsg.Load(); m != nil {
+		return *m
+	}
+	return ""
 }
 
 func (p *propagator) aofStats() (size int64, enabled bool, err error) {
@@ -347,13 +392,16 @@ func (p *propagator) swapAOFLocked(f *os.File, tmp string) error {
 	// where it was.
 	nf, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		p.aofErr = err
+		p.setAOFErrLocked(err)
 		p.server.log.Warn("reopening the AOF failed, AOF logging stopped", "err", err)
 		return errors.Join(renameErr, err)
 	}
 	p.aofFile = nf
 	if st, err := nf.Stat(); err == nil {
 		p.aofSize = st.Size()
+	}
+	if renameErr == nil {
+		p.setAOFErrLocked(nil) // the new file was written and fsynced
 	}
 	p.writerOnce.Do(func() { go p.aofWriter() })
 	return renameErr

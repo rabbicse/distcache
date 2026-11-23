@@ -167,6 +167,11 @@ func (s *Server) preExecRejection(c *Client, cmd *Command, args [][]byte) string
 		len(s.cfg.Save) > 0 && !c.isMaster {
 		return "MISCONF Errors writing to disk; write commands are disabled. Check logs for details."
 	}
+	if cmd.Has(FlagWrite) && !c.isMaster {
+		if msg := s.propagator.aofWriteError(); msg != "" {
+			return "MISCONF Errors writing to the AOF file: " + msg
+		}
+	}
 	return ""
 }
 
