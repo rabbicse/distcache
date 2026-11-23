@@ -313,7 +313,9 @@ func ParseMemory(v string) (int64, error) {
 		}
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || n < 0 {
+	// Reject values whose byte count overflows int64 rather than wrapping
+	// to a negative size that CONFIG REWRITE would then persist.
+	if err != nil || n < 0 || n > math.MaxInt64/mul {
 		return 0, errors.New("argument must be a memory value")
 	}
 	return n * mul, nil
