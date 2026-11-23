@@ -131,8 +131,10 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 	if n <= 0 {
 		return nil, nil
 	}
-	args := make([][]byte, n)
-	for i := int64(0); i < n; i++ {
+	// Declared counts and lengths are only trusted up to maxElemPrealloc
+	// and maxPrealloc, so memory tracks the bytes actually received.
+	args := make([][]byte, 0, min(n, maxElemPrealloc))
+	for range n {
 		b, err := r.br.ReadByte()
 		if err != nil {
 			return nil, err
@@ -151,11 +153,19 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 		if r.Unauthenticated && l > unauthBulkLen {
 			return nil, &ProtocolError{"unauthenticated bulk length"}
 		}
+		if l > maxPrealloc {
+			buf, err := r.readBulk(l)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, buf)
+			continue
+		}
 		buf := make([]byte, l+2)
 		if _, err := io.ReadFull(r.br, buf); err != nil {
 			return nil, err
 		}
-		args[i] = buf[:l:l]
+		args = append(args, buf[:l:l])
 	}
 	return args, nil
 }
