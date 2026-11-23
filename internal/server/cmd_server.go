@@ -563,7 +563,7 @@ func cmdConfig(c *Ctx) {
 		}
 		for i := 2; i < len(c.Args); i += 2 {
 			name := strings.ToLower(c.Arg(i))
-			if err := cfg.Set(name, c.Arg(i+1), false); err != nil {
+			if err := cfg.SetFromClient(c.Arg(i), c.Arg(i+1), c.client.isLocal()); err != nil {
 				c.Err("ERR " + err.Error())
 				return
 			}

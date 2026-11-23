@@ -67,6 +67,8 @@ type Config struct {
 	maxClientsStr   string
 	clientOutputStr string
 	saveSeen        bool
+	// enableProtected is enable-protected-configs: "no", "yes" or "local".
+	enableProtected string
 
 	// Web console settings (static, guarded by mu).
 	WebPort           int           // web-port: 0 disables the console
@@ -127,6 +129,9 @@ type param struct {
 	get     func(c *Config) string
 	set     func(c *Config, v string) error
 	mutable bool
+	// protected params can be set at startup but CONFIG SET refuses them
+	// unless enable-protected-configs allows the connection.
+	protected bool
 }
 
 // Keyspace notification flag bits.
@@ -229,6 +234,7 @@ func Default() *Config {
 		Port:              6379,
 		Dir:               ".",
 		DBFilename:        "dump.dcs",
+		enableProtected:   "no",
 		AppendFilename:    "appendonly.aof",
 		AppendFsync:       "everysec",
 		Save:              [][2]int64{{3600, 1}, {300, 100}, {60, 10000}},
@@ -376,7 +382,7 @@ var ignoredParams = []string{"protected-mode", "daemonize", "supervised", "tcp-b
 	"stream-node-max-entries", "activerehashing", "dynamic-hz", "aof-rewrite-incremental-fsync",
 	"rdb-save-incremental-fsync", "jemalloc-bg-thread", "activedefrag", "crash-log-enabled",
 	"crash-memcheck-enabled", "syslog-enabled", "syslog-ident", "syslog-facility", "enable-debug-command",
-	"enable-module-command", "enable-protected-configs", "locale-collate", "appenddirname",
+	"enable-module-command", "locale-collate", "appenddirname",
 	"cluster-enabled", "tls-port", "acllog-max-len", "tracking-table-max-keys", "active-expire-effort",
 	"close-on-oom", "unixsocketperm", "propagation-error-behavior", "lua-replicate-commands",
 	"client-query-buffer-limit-ignored", "replica-announced", "maxmemory-clients", "maxmemory-eviction-tenacity"}
@@ -413,8 +419,29 @@ func (c *Config) registerParams() {
 		})
 	c.registerWebParams()
 	c.strParam("dir", true, &c.Dir)
-	c.strParam("dbfilename", true, &c.DBFilename)
+	c.add("dbfilename", true, func(c *Config) string { return c.DBFilename },
+		func(c *Config, v string) error {
+			if strings.ContainsAny(v, `/\`) {
+				return errors.New("dbfilename can't be a path, just a filename")
+			}
+			c.DBFilename = v
+			return nil
+		})
 	c.strParam("appendfilename", false, &c.AppendFilename)
+	c.add("enable-protected-configs", false, func(c *Config) string { return c.enableProtected },
+		func(c *Config, v string) error {
+			switch v = strings.ToLower(v); v {
+			case "no", "yes", "local":
+				c.enableProtected = v
+				return nil
+			}
+			return errors.New("argument(s) must be one of the following: no, yes, local")
+		})
+	// Writing the snapshot to an arbitrary path is a well-known way to plant
+	// files, so these follow Redis's PROTECTED_CONFIG.
+	for _, n := range []string{"dir", "dbfilename", "appendfilename"} {
+		c.params[n].protected = true
+	}
 	c.strParam("logfile", false, &c.LogFile)
 	c.strParam("pidfile", false, &c.PidFile)
 	c.strParam("unixsocket", false, &c.UnixSocket)
@@ -590,6 +617,21 @@ func (c *Config) Set(name, value string, startup bool) error {
 		return fmt.Errorf("CONFIG SET failed (possibly related to argument '%s') - %v", name, err)
 	}
 	return nil
+}
+
+// SetFromClient is CONFIG SET from a connection: it refuses protected params
+// unless enable-protected-configs is yes, or local and the connection is
+// local. arg is the name as the client gave it, for the error text.
+func (c *Config) SetFromClient(arg, value string, local bool) error {
+	if p, ok := c.params[strings.ToLower(arg)]; ok && p.protected {
+		c.mu.RLock()
+		mode := c.enableProtected
+		c.mu.RUnlock()
+		if mode != "yes" && (mode != "local" || !local) {
+			return fmt.Errorf("CONFIG SET failed (possibly related to argument '%s') - can't set protected config", arg)
+		}
+	}
+	return c.Set(arg, value, false)
 }
 
 // Get returns name/value pairs matching a glob pattern.
